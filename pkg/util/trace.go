@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"hash"
 	"hash/fnv"
+	"sort"
 
 	"github.com/pkg/errors"
 
@@ -12,6 +13,59 @@ import (
 	"github.com/gogo/protobuf/proto"
 	"github.com/grafana/tempo/pkg/tempopb"
 )
+
+func CombineTracesV(objs ...[]byte) ([]byte, error) {
+
+	if len(objs) > 2 {
+		sort.Slice(objs, func(i, j int) bool {
+			return bytes.Compare(objs[i], objs[j]) == -1
+		})
+	}
+
+	// If all identical return first, regardless of content
+	// don't attempt to unmarshal.
+	allIdentical := true
+	for i := 1; i < len(objs) && allIdentical; i++ {
+		allIdentical = bytes.Equal(objs[0], objs[i])
+	}
+	if allIdentical {
+		return objs[0], nil
+	}
+
+	var lastError error
+	final := &tempopb.Trace{}
+	atLeastOneSuccessful := false
+	for i, o := range objs {
+		// Ignore duplicate bytes, since sorted
+		// we only need to check preceeding
+		if i > 0 && bytes.Equal(objs[i], objs[i-1]) {
+			continue
+		}
+
+		t := &tempopb.Trace{}
+		err := proto.Unmarshal(o, t)
+		if err != nil {
+			lastError = errors.Wrap(err, "error unmarshaling obj")
+			continue
+		}
+		atLeastOneSuccessful = true
+		final, _, _, _ = CombineTraceProtos(final, t)
+	}
+
+	if !atLeastOneSuccessful {
+		// if all failed let's send back an empty trace
+		level.Error(util.Logger).Log("msg", "all objs failed to unmarshal.  returning an empty trace")
+		bytes, _ := proto.Marshal(&tempopb.Trace{})
+		return bytes, errors.Wrap(lastError, "all objs failed to unmarshal.  returning an empty trace")
+	}
+
+	finalBytes, err := proto.Marshal(final)
+	if err != nil {
+		lastError = errors.Wrap(err, "marshalling the combined trace threw an error")
+	}
+
+	return finalBytes, lastError
+}
 
 func CombineTraces(objA []byte, objB []byte) ([]byte, error) {
 	// if the byte arrays are the same, we can return quickly

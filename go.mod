@@ -18,6 +18,7 @@ require (
 	github.com/google/uuid v1.1.1
 	github.com/gorilla/mux v1.7.4
 	github.com/grafana/loki v1.3.0
+	github.com/grpc-ecosystem/grpc-gateway v1.16.0
 	github.com/grpc-ecosystem/grpc-opentracing v0.0.0-20180507213350-8e809c8a8645
 	github.com/hashicorp/go-hclog v0.14.0
 	github.com/jaegertracing/jaeger v1.18.2-0.20200707061226-97d2319ff2be
@@ -32,6 +33,7 @@ require (
 	github.com/prometheus/common v0.15.0
 	github.com/prometheus/prometheus v1.8.2-0.20201119181812-c8f810083d3f
 	github.com/prometheus/prometheus/discovery/config v0.0.0-00010101000000-000000000000 // indirect
+	github.com/richardartoul/molecule v0.0.0-20200501172711-2c305a9a2ddc
 	github.com/sirupsen/logrus v1.6.0
 	github.com/spf13/viper v1.7.1
 	github.com/stretchr/testify v1.6.1

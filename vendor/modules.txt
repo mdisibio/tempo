@@ -530,6 +530,7 @@ github.com/grpc-ecosystem/go-grpc-middleware/util/metautils
 github.com/grpc-ecosystem/go-grpc-prometheus
 github.com/grpc-ecosystem/go-grpc-prometheus/packages/grpcstatus
 # github.com/grpc-ecosystem/grpc-gateway v1.16.0
+## explicit
 github.com/grpc-ecosystem/grpc-gateway/internal
 github.com/grpc-ecosystem/grpc-gateway/protoc-gen-swagger/options
 github.com/grpc-ecosystem/grpc-gateway/runtime
@@ -751,6 +752,7 @@ github.com/olekukonko/tablewriter
 # github.com/open-telemetry/opentelemetry-proto v0.4.0
 ## explicit
 github.com/open-telemetry/opentelemetry-proto/gen/go/common/v1
+github.com/open-telemetry/opentelemetry-proto/gen/go/metrics/v1
 github.com/open-telemetry/opentelemetry-proto/gen/go/resource/v1
 github.com/open-telemetry/opentelemetry-proto/gen/go/trace/v1
 # github.com/opentracing-contrib/go-grpc v0.0.0-20191001143057-db30781987df => github.com/pracucci/go-grpc v0.0.0-20201022134131-ef559b8db645
@@ -908,6 +910,10 @@ github.com/quasilyte/go-ruleguard/ruleguard
 github.com/quasilyte/go-ruleguard/ruleguard/typematch
 # github.com/quasilyte/regex/syntax v0.0.0-20200407221936-30656e2c4a95
 github.com/quasilyte/regex/syntax
+# github.com/richardartoul/molecule v0.0.0-20200501172711-2c305a9a2ddc
+## explicit
+github.com/richardartoul/molecule
+github.com/richardartoul/molecule/src/codec
 # github.com/rs/cors v1.7.0
 github.com/rs/cors
 # github.com/rs/xid v1.2.1

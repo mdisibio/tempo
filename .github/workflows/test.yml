@@ -22,6 +22,7 @@ jobs:
       
       # This writes the destination into $DEST
       - run: |
+          cd .github/workflows/
           go run test.go ${{ github.ref_name }}
      
       - shell: bash

@@ -27,5 +27,4 @@ jobs:
      
       - shell: bash
         run: |
-          test -n "dest is $DEST"
-          test -n "${{ steps.publish.outputs.working_directory }}"
+          echo "dest is $DEST"

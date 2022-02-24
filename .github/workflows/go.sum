@@ -1,0 +1,4 @@
+github.com/masterminds/semver v1.5.0 h1:hTxJTTY7tjvnWMrl08O6u3G6BLlKVwxSz01lVac9P8U=
+github.com/masterminds/semver v1.5.0/go.mod h1:s7KNT9fnd7edGzwwP7RBX4H0v/CYd5qdOLfkL1V75yg=
+golang.org/x/mod v0.5.1 h1:OJxoQ/rynoF0dcCdI7cLPktw/hR2cueqYfjm43oqK38=
+golang.org/x/mod v0.5.1/go.mod h1:5OXOZSfqPIIbmVBIIKWRFfZjPR0E5r58TLhUjH0a2Ro=

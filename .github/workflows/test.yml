@@ -5,6 +5,8 @@ on:
     branches:
       - main
       - release-*
+    tags:        
+      - v?.*
     paths:
       - 'docs/tempo/website/**'
 

@@ -24,7 +24,8 @@ jobs:
       - name: Run backport
         uses: ./actions/backport
         with:
-          metricsWriteAPIKey: ABC${{secrets.GRAFANA_MISC_STATS_API_KEY}}
-          token: ${{secrets.GH_BOT_ACCESS_TOKEN}}
+          #metricsWriteAPIKey: ABC${{secrets.GRAFANA_MISC_STATS_API_KEY}}
+          #token: ${{secrets.GH_BOT_ACCESS_TOKEN}}
+          token: ${{secrets.GITHUB_TOKEN}}
           labelsToAdd: "backport"
           title: "[{{base}}] {{originalTitle}}"

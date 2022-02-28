@@ -6,7 +6,7 @@ on:
       - main
       - release-*
     tags:        
-      - v?.*
+      - v[0-9]+.[0-9]+.[0-9]+
     paths:
       - 'docs/tempo/website/**'
 
@@ -30,3 +30,23 @@ jobs:
       - shell: bash
         run: |
           echo "dest is $DEST"
+
+      - name: Checkout Actions
+        uses: actions/checkout@v2
+        with:
+          repository: "mdisibio/grafana-github-actions"
+          path: ./actions
+          ref: docstarget
+
+      - name: Install Actions
+        run: npm install --production --prefix ./actions
+
+      - id:   target
+        name: Get target
+        uses: ./actions/docs-target
+        with:
+          ref_name: ${{ github.ref_name }}
+
+      - shell: bash
+        run: |
+          echo "action returned " ${{ steps.target.outputs.target }} 

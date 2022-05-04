@@ -18,19 +18,29 @@ jobs:
       - name: Checkout Actions
         uses: actions/checkout@v2
         with:
-          repository: "mdisibio/grafana-github-actions"
+          repository: "grafana/grafana-github-actions"
           path: ./actions
-          ref: docstarget
+          ref: jdb/2022-04-has-matching-release-tag
 
       - name: Install Actions
         run: npm install --production --prefix ./actions
 
+      - name: Determine if there is a matching release tag
+        id: has-matching-release-tag
+        uses: ./actions/has-matching-release-tag
+        with:
+          ref_name: "${{ github.ref_name }}"
+          release_tag_regexp: "^release-\\d+\\.\\d+\\.\\d+$"
+          release_branch_regexp: "^release-\\d+\\.\\d+$"
+
       - id:   target
+        if: "steps.has-matching-release-tag.outputs.bool == 'true'"        
         name: Get target
         uses: ./actions/docs-target
         with:
           ref_name: ${{ github.ref_name }}
 
       - shell: bash
+        if: "steps.has-matching-release-tag.outputs.bool == 'true'"        
         run: |
           echo "action returned " ${{ steps.target.outputs.target }} 

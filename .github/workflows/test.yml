@@ -14,6 +14,11 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
+
+      # Fetch tags
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
  
       - name: Checkout Actions
         uses: actions/checkout@v2

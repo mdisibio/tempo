@@ -33,12 +33,28 @@ const (
 
 	EnvVarSyncIteratorName  = "VPARQUET_SYNC_ITERATOR"
 	EnvVarSyncIteratorValue = "1"
+
+	KindUnspecified = "unspecified"
+	KindInternal    = "internal"
+	KindClient      = "client"
+	KindServer      = "server"
+	KindProducer    = "producer"
+	KindConsumer    = "consumer"
 )
 
 var StatusCodeMapping = map[string]int{
 	StatusCodeUnset: int(v1.Status_STATUS_CODE_UNSET),
 	StatusCodeOK:    int(v1.Status_STATUS_CODE_OK),
 	StatusCodeError: int(v1.Status_STATUS_CODE_ERROR),
+}
+
+var KindMapping = map[string]int{
+	KindUnspecified: int(v1.Span_SPAN_KIND_UNSPECIFIED),
+	KindInternal:    int(v1.Span_SPAN_KIND_INTERNAL),
+	KindClient:      int(v1.Span_SPAN_KIND_CLIENT),
+	KindServer:      int(v1.Span_SPAN_KIND_SERVER),
+	KindProducer:    int(v1.Span_SPAN_KIND_PRODUCER),
+	KindConsumer:    int(v1.Span_SPAN_KIND_CONSUMER),
 }
 
 // openForSearch consolidates all the logic for opening a parquet file

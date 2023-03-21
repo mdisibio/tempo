@@ -2,8 +2,10 @@ package vparquet
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
 	"path"
+	"sort"
 	"testing"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/grafana/tempo/tempodb/backend"
 	"github.com/grafana/tempo/tempodb/backend/local"
 	"github.com/grafana/tempo/tempodb/encoding/common"
+	"github.com/segmentio/parquet-go"
 	"github.com/stretchr/testify/require"
 )
 
@@ -402,4 +405,304 @@ func BenchmarkBackendBlockSearchTraces(b *testing.B) {
 			b.ReportMetric(float64(bytesRead)/float64(b.N), "bytes/op")
 		})
 	}
+}
+
+func TestDynamicMetrics(t *testing.T) {
+	ctx := context.TODO()
+	tenantID := "1"
+	blockID := uuid.MustParse("f04f746c-b463-40be-b7ec-408f7d291b21")
+
+	r, _, _, err := local.New(&local.Config{
+		Path: path.Join("/Users/marty/src/tmp/roblox_files"),
+	})
+	require.NoError(t, err)
+
+	rr := backend.NewReader(r)
+	meta, err := rr.BlockMeta(ctx, blockID, tenantID)
+	require.NoError(t, err)
+
+	pool := newRowPool(1000)
+
+	block := newBackendBlock(meta, rr)
+	sch := parquet.SchemaOf(new(Trace))
+
+	iter, err := block.RawIterator(ctx, pool)
+	require.NoError(t, err)
+	defer iter.Close()
+
+	data := map[TimestampBucket]*TimestampMetrics{}
+
+	count := 1_500_000
+	//count := 100_000
+	//count := 1_000_000
+
+	//timeStampCounts := map[TimestampBucket]*TimestampMetrics{}
+
+	getTimestampBucket := func(s *Span) *TimestampMetrics {
+		granularity := uint64(15 * time.Second)
+		//granularity := uint64(time.Minute)
+
+		bucket := TimestampBucket(s.EndUnixNanos / granularity * granularity)
+
+		if metrics := data[bucket]; metrics == nil {
+			data[bucket] = &TimestampMetrics{
+				Bucket:    time.Unix(0, int64(bucket)),
+				Resources: map[ResourceHash]*ResourceMetrics{},
+			}
+		}
+		return data[bucket]
+	}
+
+	serverSpans := 0
+	nonServerSpans := 0
+	i := 0
+	for ; i < count; i++ {
+
+		_, row, err := iter.Next(ctx)
+		if err != nil {
+			fmt.Println("Iter err:", err)
+			break
+		}
+		if len(row) == 0 {
+			break
+		}
+
+		tr := new(Trace)
+		err = sch.Reconstruct(tr, row)
+		if err != nil {
+			fmt.Println("Iter err:", err)
+			break
+		}
+		pool.Put(row)
+
+		for _, rs := range tr.ResourceSpans {
+
+			var resData *ResourceMetrics
+
+			for _, ss := range rs.ScopeSpans {
+				for _, s := range ss.Spans {
+					if s.Kind != int(v1.Span_SPAN_KIND_SERVER) {
+						nonServerSpans++
+						continue
+					}
+					serverSpans++
+
+					ts := getTimestampBucket(&s)
+					ts.TotalSpans++
+
+					if resData == nil {
+						resAttrs := getAttrs(rs.Resource)
+						hash := ResourceHash(hashAttrs(resAttrs))
+
+						if ts.Resources[hash] == nil {
+							ts.Resources[hash] = &ResourceMetrics{
+								Attributes: resAttrs,
+								Spans:      map[SpanHash]*SpanMetrics{},
+							}
+						}
+						resData = ts.Resources[hash]
+					}
+					resData.Count++
+
+					name, attrs := getSpanAttrs(s)
+					spanHash := hashSpanAttrs(name, attrs)
+
+					if resData.Spans[spanHash] == nil {
+						resData.Spans[spanHash] = &SpanMetrics{
+							Name:       name,
+							Attributes: attrs,
+						}
+					}
+					spanData := resData.Spans[spanHash]
+					spanData.Count++
+				}
+			}
+		}
+	}
+
+	var (
+		numSpanSeries     = 0
+		numSpans          = 0
+		numResources      = 0
+		distinctResources = map[ResourceHash]struct{}{}
+		distinctSpans     = map[SpanHash]struct{}{}
+		dataSlice         = []*TimestampMetrics{}
+		spanSeriesSlice   = []*SpanMetrics{}
+	)
+	for _, ts := range data {
+		/*fmt.Println()
+		fmt.Println("Count=", v.Count)
+		for _, a := range v.Attributes {
+			fmt.Println(a.Key, "=", a.String)
+		}*/
+		numResources += len(ts.Resources)
+		numSpans += ts.TotalSpans
+		dataSlice = append(dataSlice, ts)
+
+		for resHash, res := range ts.Resources {
+			numSpanSeries += len(res.Spans)
+
+			distinctResources[resHash] = struct{}{}
+
+			for spanHash, spans := range res.Spans {
+				distinctSpans[spanHash] = struct{}{}
+
+				spanSeriesSlice = append(spanSeriesSlice, spans)
+			}
+		}
+	}
+	fmt.Println("Num Traces:", i)
+	fmt.Println("Num Time buckets:", len(data))
+	fmt.Println("Distinct resources", len(distinctResources))
+	fmt.Println("Distinct spans", len(distinctSpans))
+	fmt.Println("Total resource series", numResources, "Avg per time bucket:", float32(numResources)/float32(len(data)))
+	fmt.Println("Num Span Series:", numSpanSeries, "Avg per resource:", float32(numSpanSeries)/float32(numResources), "Avg per time bucket:", float32(numSpanSeries)/float32(len(data)))
+	fmt.Println("Num spans:", numSpans, "Avg per resource:", float32(numSpans)/float32(numResources), "Avg per time bucket:", float32(numSpans)/float32(len(data)))
+	fmt.Println("Num Server spans:", serverSpans, "Non-server spans:", nonServerSpans)
+
+	sort.Slice(dataSlice, func(i, j int) bool {
+		return dataSlice[j].TotalSpans < dataSlice[i].TotalSpans
+	})
+	for i := 0; i < 10 && i < len(dataSlice); i++ {
+		fmt.Println("Bucket", dataSlice[i].Bucket, "Span count", dataSlice[i].TotalSpans)
+	}
+
+	sort.Slice(spanSeriesSlice, func(i, j int) bool {
+		return spanSeriesSlice[j].Count < spanSeriesSlice[i].Count
+	})
+	for i := 0; i < 10 && i < len(spanSeriesSlice); i++ {
+		fmt.Println("Top Span Series", spanSeriesSlice[i].Name, spanSeriesSlice[i].Attributes, "Count", spanSeriesSlice[i].Count)
+	}
+}
+
+type AttributeValue struct {
+	Key    string
+	String string
+	Int    int64
+	Float  float64
+}
+
+type SpanMetrics struct {
+	Name       string
+	Attributes []AttributeValue
+
+	Count int
+}
+
+type ResourceSeries map[string]AttributeValue
+
+type ResourceMetrics struct {
+	Attributes []AttributeValue
+	Count      int
+
+	Spans map[SpanHash]*SpanMetrics
+}
+
+type TimestampMetrics struct {
+	Bucket     time.Time
+	TotalSpans int
+	Resources  map[ResourceHash]*ResourceMetrics
+}
+
+type TimestampBucket uint64
+type ResourceHash uint64
+type SpanHash uint64
+
+func getAttrs(r Resource) []AttributeValue {
+	attrs := []AttributeValue{}
+	quickAdd := func(name, value string) {
+		if value != "" {
+			attrs = append(attrs, AttributeValue{Key: name, String: value})
+		}
+	}
+	quickAdd("service.name", r.ServiceName)
+
+	for _, a := range r.Attrs {
+		/*if a.Key == "tracer.id" {
+			continue
+		}
+		if a.Key == "host.name" {
+			continue
+		}
+		if a.Key == "lightstep.hostname" {
+			continue
+		}
+		if a.Key == "nomad.allocation.id" {
+			continue
+		}*/
+
+		aa := AttributeValue{Key: a.Key}
+		if a.Value != nil {
+			aa.String = *a.Value
+		}
+		if a.ValueInt != nil {
+			aa.Int = *a.ValueInt
+		}
+		// TODO more value types
+		attrs = append(attrs, aa)
+	}
+
+	sort.Slice(attrs, func(i, j int) bool {
+		return attrs[i].Key < attrs[j].Key
+	})
+	return attrs
+}
+
+func hashAttrs(attrs []AttributeValue) uint64 {
+
+	h := newHash()
+	for _, a := range attrs {
+		h.Write([]byte(a.Key))
+		h.Write([]byte(a.String))
+	}
+
+	return h.Sum64()
+}
+
+func getSpanAttrs(s Span) (name string, attrs []AttributeValue) {
+	name = s.Name
+
+	quickAdd := func(name string, value *string) {
+		if value != nil {
+			attrs = append(attrs, AttributeValue{Key: name, String: *value})
+		}
+	}
+	quickAddInt := func(name string, value *int64) {
+		if value != nil {
+			attrs = append(attrs, AttributeValue{Key: name, Int: *value})
+		}
+	}
+	quickAdd("http.url", s.HttpUrl)
+	quickAdd("http.method", s.HttpMethod)
+	quickAddInt("http.status_code", s.HttpStatusCode)
+
+	for _, a := range s.Attrs {
+		aa := AttributeValue{Key: a.Key}
+		if a.Value != nil {
+			aa.String = *a.Value
+		}
+		if a.ValueInt != nil {
+			aa.Int = *a.ValueInt
+		}
+		// TODO more value types
+		attrs = append(attrs, aa)
+	}
+
+	sort.Slice(attrs, func(i, j int) bool {
+		return attrs[i].Key < attrs[j].Key
+	})
+
+	return
+}
+
+func hashSpanAttrs(name string, attrs []AttributeValue) SpanHash {
+
+	h := newHash()
+	h.Write([]byte(name))
+	for _, a := range attrs {
+		h.Write([]byte(a.Key))
+		h.Write([]byte(a.String))
+	}
+
+	return SpanHash(h.Sum64())
 }

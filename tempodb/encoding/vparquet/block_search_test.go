@@ -2,8 +2,10 @@ package vparquet
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"math/rand"
+	"os"
 	"path"
 	"sort"
 	"testing"
@@ -407,6 +409,11 @@ func BenchmarkBackendBlockSearchTraces(b *testing.B) {
 	}
 }
 
+func TestDynamicOutputSchema(t *testing.T) {
+	sch := parquet.SchemaOf(new(TimestampRow))
+	fmt.Println(sch.String())
+}
+
 func TestDynamicMetrics(t *testing.T) {
 	ctx := context.TODO()
 	tenantID := "1"
@@ -421,7 +428,7 @@ func TestDynamicMetrics(t *testing.T) {
 	meta, err := rr.BlockMeta(ctx, blockID, tenantID)
 	require.NoError(t, err)
 
-	pool := newRowPool(1000)
+	pool := newRowPool(100_000)
 
 	block := newBackendBlock(meta, rr)
 	sch := parquet.SchemaOf(new(Trace))
@@ -432,8 +439,8 @@ func TestDynamicMetrics(t *testing.T) {
 
 	data := map[TimestampBucket]*TimestampMetrics{}
 
-	count := 1_500_000
-	//count := 100_000
+	//count := 1_500_000
+	count := 100_000
 	//count := 1_000_000
 
 	//timeStampCounts := map[TimestampBucket]*TimestampMetrics{}
@@ -456,7 +463,12 @@ func TestDynamicMetrics(t *testing.T) {
 	serverSpans := 0
 	nonServerSpans := 0
 	i := 0
+	tr := new(Trace)
 	for ; i < count; i++ {
+
+		if i%100_000 == 0 {
+			fmt.Println("Processing row", i)
+		}
 
 		_, row, err := iter.Next(ctx)
 		if err != nil {
@@ -467,7 +479,6 @@ func TestDynamicMetrics(t *testing.T) {
 			break
 		}
 
-		tr := new(Trace)
 		err = sch.Reconstruct(tr, row)
 		if err != nil {
 			fmt.Println("Iter err:", err)
@@ -492,6 +503,7 @@ func TestDynamicMetrics(t *testing.T) {
 
 					if resData == nil {
 						resAttrs := getAttrs(rs.Resource)
+						//hash := ResourceHash(resAttrs)
 						hash := ResourceHash(hashAttrs(resAttrs))
 
 						if ts.Resources[hash] == nil {
@@ -515,6 +527,7 @@ func TestDynamicMetrics(t *testing.T) {
 					}
 					spanData := resData.Spans[spanHash]
 					spanData.Count++
+					spanData.Durations = append(spanData.Durations, int(s.EndUnixNanos-s.StartUnixNanos))
 				}
 			}
 		}
@@ -573,26 +586,84 @@ func TestDynamicMetrics(t *testing.T) {
 	for i := 0; i < 10 && i < len(spanSeriesSlice); i++ {
 		fmt.Println("Top Span Series", spanSeriesSlice[i].Name, spanSeriesSlice[i].Attributes, "Count", spanSeriesSlice[i].Count)
 	}
+
+	for i := len(spanSeriesSlice) - 1; i >= 0 && i >= len(spanSeriesSlice)-10; i-- {
+		fmt.Println("Bottom Span Series", spanSeriesSlice[i].Name, spanSeriesSlice[i].Attributes, "Count", spanSeriesSlice[i].Count)
+	}
+
+	// Write to output
+	sort.Slice(dataSlice, func(i, j int) bool {
+		return dataSlice[i].Bucket.Before(dataSlice[j].Bucket)
+	})
+
+	outf, err := os.Create("output.parquet")
+	require.NoError(t, err)
+	defer outf.Close()
+
+	outw := parquet.NewGenericWriter[TimestampRow](outf)
+	defer outw.Close()
+
+	for i, bucket := range dataSlice {
+		tsRow := TimestampRow{
+			Bucket:     uint32(bucket.Bucket.Unix()),
+			TotalSpans: bucket.TotalSpans,
+		}
+
+		for _, res := range bucket.Resources {
+			resRow := ResourceRow{
+				Attributes: res.Attributes,
+				TotalSpans: res.Count,
+			}
+
+			for _, span := range res.Spans {
+				spanRow := SpanRow{
+					Name:       span.Name,
+					Attributes: span.Attributes,
+					TotalSpans: span.Count,
+				}
+				sort.Ints(span.Durations)
+				for _, dur := range span.Durations {
+					spanRow.Durations = append(spanRow.Durations, SpanDuration{Value: dur})
+				}
+
+				resRow.Spans = append(resRow.Spans, spanRow)
+			}
+
+			//sort.Slice(resRow.Spans, func(i, j int) bool {
+			//	return resRow.Spans[i].Attributes < resRow.Spans[j].Attributes
+			//})
+			tsRow.Resources = append(tsRow.Resources, resRow)
+		}
+
+		//sort.Slice(tsRow.Resources, func(i, j int) bool {
+		//	return tsRow.Resources[i].Attributes < tsRow.Resources[j].Attributes
+		//})
+
+		outw.Write([]TimestampRow{tsRow})
+		outw.Flush()
+		fmt.Println("Flushed rowgroup", i)
+	}
 }
 
-type AttributeValue struct {
-	Key    string
-	String string
-	Int    int64
-	Float  float64
-}
+/*type AttributeValue struct {
+	Key    string  `parquet:",dict"`
+	String *string `parquet:",dict"`
+	Int    *int64  `parquet:",delta"`
+	Float  *float64
+}*/
 
 type SpanMetrics struct {
 	Name       string
-	Attributes []AttributeValue
+	Attributes []Attribute
 
-	Count int
+	Count     int
+	Durations []int
 }
 
-type ResourceSeries map[string]AttributeValue
+//type ResourceSeries map[string]AttributeValue
 
 type ResourceMetrics struct {
-	Attributes []AttributeValue
+	Attributes []Attribute
 	Count      int
 
 	Spans map[SpanHash]*SpanMetrics
@@ -608,101 +679,109 @@ type TimestampBucket uint64
 type ResourceHash uint64
 type SpanHash uint64
 
-func getAttrs(r Resource) []AttributeValue {
-	attrs := []AttributeValue{}
-	quickAdd := func(name, value string) {
-		if value != "" {
-			attrs = append(attrs, AttributeValue{Key: name, String: value})
+func getAttrs(r Resource) (attrs []Attribute) {
+
+	quickAdd := func(name string, value *string) {
+		if value != nil {
+			attrs = append(attrs, Attribute{Key: name, Value: value})
 		}
 	}
-	quickAdd("service.name", r.ServiceName)
-
+	quickAddInt := func(name string, value *int64) {
+		if value != nil {
+			attrs = append(attrs, Attribute{Key: name, ValueInt: value})
+		}
+	}
+	quickAdd("service.name", &r.ServiceName)
 	for _, a := range r.Attrs {
-		/*if a.Key == "tracer.id" {
-			continue
-		}
-		if a.Key == "host.name" {
-			continue
-		}
-		if a.Key == "lightstep.hostname" {
-			continue
-		}
-		if a.Key == "nomad.allocation.id" {
-			continue
-		}*/
-
-		aa := AttributeValue{Key: a.Key}
-		if a.Value != nil {
-			aa.String = *a.Value
-		}
-		if a.ValueInt != nil {
-			aa.Int = *a.ValueInt
-		}
-		// TODO more value types
-		attrs = append(attrs, aa)
+		quickAdd(a.Key, a.Value)
+		quickAddInt(a.Key, a.ValueInt)
 	}
-
 	sort.Slice(attrs, func(i, j int) bool {
 		return attrs[i].Key < attrs[j].Key
 	})
 	return attrs
 }
 
-func hashAttrs(attrs []AttributeValue) uint64 {
-
+func hashAttrs(attrs []Attribute) uint64 {
+	buf := make([]byte, 8)
 	h := newHash()
 	for _, a := range attrs {
 		h.Write([]byte(a.Key))
-		h.Write([]byte(a.String))
+		if a.Value != nil {
+			h.Write([]byte(*a.Value))
+		}
+		if a.ValueInt != nil {
+			binary.BigEndian.PutUint64(buf, uint64(*a.ValueInt))
+			h.Write([]byte(buf))
+		}
 	}
 
 	return h.Sum64()
 }
 
-func getSpanAttrs(s Span) (name string, attrs []AttributeValue) {
+func getSpanAttrs(s Span) (name string, attrs []Attribute) {
 	name = s.Name
-
 	quickAdd := func(name string, value *string) {
 		if value != nil {
-			attrs = append(attrs, AttributeValue{Key: name, String: *value})
+			attrs = append(attrs, Attribute{Key: name, Value: value})
 		}
 	}
 	quickAddInt := func(name string, value *int64) {
 		if value != nil {
-			attrs = append(attrs, AttributeValue{Key: name, Int: *value})
+			attrs = append(attrs, Attribute{Key: name, ValueInt: value})
 		}
 	}
 	quickAdd("http.url", s.HttpUrl)
 	quickAdd("http.method", s.HttpMethod)
 	quickAddInt("http.status_code", s.HttpStatusCode)
-
 	for _, a := range s.Attrs {
-		aa := AttributeValue{Key: a.Key}
-		if a.Value != nil {
-			aa.String = *a.Value
-		}
-		if a.ValueInt != nil {
-			aa.Int = *a.ValueInt
-		}
-		// TODO more value types
-		attrs = append(attrs, aa)
+		quickAdd(a.Key, a.Value)
+		quickAddInt(a.Key, a.ValueInt)
 	}
-
 	sort.Slice(attrs, func(i, j int) bool {
 		return attrs[i].Key < attrs[j].Key
 	})
-
 	return
 }
 
-func hashSpanAttrs(name string, attrs []AttributeValue) SpanHash {
+func hashSpanAttrs(name string, attrs []Attribute) SpanHash {
+	buf := make([]byte, 8)
 
 	h := newHash()
 	h.Write([]byte(name))
 	for _, a := range attrs {
 		h.Write([]byte(a.Key))
-		h.Write([]byte(a.String))
+		if a.Value != nil {
+			h.Write([]byte(*a.Value))
+		}
+		if a.ValueInt != nil {
+			binary.BigEndian.PutUint64(buf, uint64(*a.ValueInt))
+			h.Write(buf)
+		}
 	}
 
 	return SpanHash(h.Sum64())
+}
+
+type SpanDuration struct {
+	Value int `parquet:",delta"`
+}
+
+type SpanRow struct {
+	Name       string         `parquet:",dict"`
+	Attributes []Attribute    `parquet:""`
+	TotalSpans int            `parquet:",delta"`
+	Durations  []SpanDuration `parquet:""`
+}
+
+type ResourceRow struct {
+	Attributes []Attribute `parquet:""`
+	TotalSpans int         `parquet:",delta"`
+	Spans      []SpanRow   `parquet:""`
+}
+
+type TimestampRow struct {
+	Bucket     uint32        `parquet:",delta"`
+	TotalSpans int           `parquet:",delta"`
+	Resources  []ResourceRow `parquet:""`
 }

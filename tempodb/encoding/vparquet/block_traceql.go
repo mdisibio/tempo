@@ -694,6 +694,10 @@ func createResourceIterator(makeIter makeIterFn, spanIterator parquetquery.Itera
 		genericConditions = append(genericConditions, cond)
 	}
 
+	for columnPath, predicates := range columnPredicates {
+		iters = append(iters, makeIter(columnPath, parquetquery.NewOrPredicate(predicates...), columnSelectAs[columnPath]))
+	}
+
 	attrIter, err := createAttributeIterator(makeIter, genericConditions, DefinitionLevelResourceAttrs,
 		columnPathResourceAttrKey, columnPathResourceAttrString, columnPathResourceAttrInt, columnPathResourceAttrDouble, columnPathResourceAttrBool, allConditions)
 	if err != nil {
@@ -1230,7 +1234,7 @@ func (c *batchCollector) KeepGroup(res *parquetquery.IteratorResult) bool {
 		}
 	}
 
-	var filteredSpans []traceql.Span
+	filteredSpans := make([]traceql.Span, 0, len(c.buffer))
 
 	// Copy over only spans that met minimum criteria
 	if c.requireAtLeastOneMatchOverall {
@@ -1242,7 +1246,7 @@ func (c *batchCollector) KeepGroup(res *parquetquery.IteratorResult) bool {
 			putSpan(span)
 		}
 	} else {
-		filteredSpans = make([]traceql.Span, 0, len(c.buffer))
+		//filteredSpans = make([]traceql.Span, 0, len(c.buffer))
 		for _, span := range c.buffer {
 			filteredSpans = append(filteredSpans, span)
 		}

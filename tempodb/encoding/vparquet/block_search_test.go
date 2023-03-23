@@ -8,6 +8,8 @@ import (
 	"os"
 	"path"
 	"sort"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,11 +17,13 @@ import (
 	tempo_io "github.com/grafana/tempo/pkg/io"
 	"github.com/grafana/tempo/pkg/tempopb"
 	v1 "github.com/grafana/tempo/pkg/tempopb/trace/v1"
+	"github.com/grafana/tempo/pkg/traceql"
 	"github.com/grafana/tempo/pkg/util"
 	"github.com/grafana/tempo/pkg/util/test"
 	"github.com/grafana/tempo/tempodb/backend"
 	"github.com/grafana/tempo/tempodb/backend/local"
 	"github.com/grafana/tempo/tempodb/encoding/common"
+	"github.com/prometheus/common/model"
 	"github.com/segmentio/parquet-go"
 	"github.com/stretchr/testify/require"
 )
@@ -702,6 +706,32 @@ func getAttrs(r Resource) (attrs []Attribute) {
 	return attrs
 }
 
+func getResAttrs(r Resource) (serviceName string, attrs []Attribute) {
+	r.ServiceName = serviceName
+
+	quickAdd := func(name string, value *string) {
+		if value != nil {
+			attrs = append(attrs, Attribute{Key: name, Value: value})
+		}
+	}
+	quickAddInt := func(name string, value *int64) {
+		if value != nil {
+			attrs = append(attrs, Attribute{Key: name, ValueInt: value})
+		}
+	}
+
+	for _, a := range r.Attrs {
+		quickAdd(a.Key, a.Value)
+		quickAddInt(a.Key, a.ValueInt)
+	}
+
+	sort.Slice(attrs, func(i, j int) bool {
+		return attrs[i].Key < attrs[j].Key
+	})
+
+	return
+}
+
 func hashAttrs(attrs []Attribute) uint64 {
 	buf := make([]byte, 8)
 	h := newHash()
@@ -784,4 +814,261 @@ type TimestampRow struct {
 	Bucket     uint32        `parquet:",delta"`
 	TotalSpans int           `parquet:",delta"`
 	Resources  []ResourceRow `parquet:""`
+}
+
+type ResourceMetrics2 struct {
+	sortingLabels string
+	ServiceName   string
+	Attributes    []Attribute
+	Count         int
+
+	Spans map[SpanHash]*SpanMetrics
+}
+
+func toSortingLabels(name string, attrs []Attribute) string {
+	ls := model.LabelSet{}
+	ls[model.MetricNameLabel] = model.LabelValue(name)
+
+	for _, a := range attrs {
+		if a.Value != nil {
+			ls[model.LabelName(a.Key)] = model.LabelValue(*a.Value)
+			continue
+		}
+		if a.ValueInt != nil {
+			ls[model.LabelName(a.Key)] = model.LabelValue(strconv.Itoa(int(*a.ValueInt)))
+			continue
+		}
+	}
+
+	return ls.String()
+}
+
+func TestDynamicMetricsBucketByResource(t *testing.T) {
+	ctx := context.TODO()
+	tenantID := "1"
+	blockID := uuid.MustParse("f04f746c-b463-40be-b7ec-408f7d291b21")
+
+	r, _, _, err := local.New(&local.Config{
+		Path: path.Join("/Users/marty/src/tmp/roblox_files"),
+	})
+	require.NoError(t, err)
+
+	rr := backend.NewReader(r)
+	meta, err := rr.BlockMeta(ctx, blockID, tenantID)
+	require.NoError(t, err)
+
+	pool := newRowPool(100_000)
+
+	block := newBackendBlock(meta, rr)
+	sch := parquet.SchemaOf(new(Trace))
+
+	iter, err := block.RawIterator(ctx, pool)
+	require.NoError(t, err)
+	defer iter.Close()
+
+	data := map[ResourceHash]*ResourceMetrics2{}
+
+	//count := 1_500_000
+	count := 100_000
+	//count := 1_000_000
+
+	serverSpans := 0
+	nonServerSpans := 0
+	i := 0
+	tr := new(Trace)
+	for ; i < count; i++ {
+
+		if i%100_000 == 0 {
+			fmt.Println("Processing row", i)
+		}
+
+		_, row, err := iter.Next(ctx)
+		if err != nil {
+			fmt.Println("Iter err:", err)
+			break
+		}
+		if len(row) == 0 {
+			break
+		}
+
+		err = sch.Reconstruct(tr, row)
+		if err != nil {
+			fmt.Println("Iter err:", err)
+			break
+		}
+		pool.Put(row)
+
+		for _, rs := range tr.ResourceSpans {
+
+			var resData *ResourceMetrics2
+
+			for _, ss := range rs.ScopeSpans {
+				for _, s := range ss.Spans {
+					if s.Kind != int(v1.Span_SPAN_KIND_SERVER) {
+						nonServerSpans++
+						continue
+					}
+					serverSpans++
+
+					if resData == nil {
+						name, resAttrs := getResAttrs(rs.Resource)
+						//hash := ResourceHash(resAttrs)
+						hash := ResourceHash(hashSpanAttrs(name, resAttrs))
+
+						resData = &ResourceMetrics2{
+							sortingLabels: toSortingLabels(name, resAttrs),
+							ServiceName:   name,
+							Attributes:    resAttrs,
+							Spans:         map[SpanHash]*SpanMetrics{},
+						}
+						data[hash] = resData
+					}
+					resData.Count++
+
+					name, attrs := getSpanAttrs(s)
+					spanHash := hashSpanAttrs(name, attrs)
+
+					if resData.Spans[spanHash] == nil {
+						resData.Spans[spanHash] = &SpanMetrics{
+							Name:       name,
+							Attributes: attrs,
+						}
+					}
+					spanData := resData.Spans[spanHash]
+					spanData.Count++
+					spanData.Durations = append(spanData.Durations, int(s.EndUnixNanos-s.StartUnixNanos))
+				}
+			}
+		}
+	}
+
+	var (
+		numSpanSeries = 0
+		numSpans      = 0
+		numResources  = 0
+		distinctSpans = map[SpanHash]struct{}{}
+		dataSlice     = []*ResourceMetrics2{}
+	)
+
+	numResources = len(data)
+	for _, res := range data {
+		numSpanSeries += len(res.Spans)
+		dataSlice = append(dataSlice, res)
+		for spanHash := range res.Spans {
+			distinctSpans[spanHash] = struct{}{}
+		}
+	}
+
+	fmt.Println("Num Traces:", i)
+	fmt.Println("Distinct resources", len(data))
+	fmt.Println("Distinct spans", len(distinctSpans))
+	fmt.Println("Num Span Series:", numSpanSeries, "Avg per resource:", float32(numSpanSeries)/float32(numResources), "Avg per time bucket:", float32(numSpanSeries)/float32(len(data)))
+	fmt.Println("Num spans:", numSpans, "Avg per resource:", float32(numSpans)/float32(numResources), "Avg per time bucket:", float32(numSpans)/float32(len(data)))
+	fmt.Println("Num Server spans:", serverSpans, "Non-server spans:", nonServerSpans)
+
+	sort.Slice(dataSlice, func(i, j int) bool {
+		return strings.Compare(dataSlice[i].sortingLabels, dataSlice[j].sortingLabels) == -1
+	})
+
+	// Write to output
+
+	outf, err := os.Create("output.parquet")
+	require.NoError(t, err)
+	defer outf.Close()
+
+	outw := parquet.NewGenericWriter[ResourceRow](outf)
+	defer outw.Close()
+
+	rows := []ResourceRow{}
+	for _, res := range dataSlice {
+		resRow := ResourceRow{
+			Attributes: res.Attributes,
+			TotalSpans: res.Count,
+		}
+
+		for _, span := range res.Spans {
+			spanRow := SpanRow{
+				Name:       span.Name,
+				Attributes: span.Attributes,
+				TotalSpans: span.Count,
+			}
+			sort.Ints(span.Durations)
+			for _, dur := range span.Durations {
+				spanRow.Durations = append(spanRow.Durations, SpanDuration{Value: dur})
+			}
+
+			resRow.Spans = append(resRow.Spans, spanRow)
+		}
+		rows = append(rows, resRow)
+	}
+
+	outw.Write(rows)
+
+}
+
+func TestDynamicMetricsOnExistingBlock(t *testing.T) {
+	ctx := context.TODO()
+	tenantID := "1"
+	blockID := uuid.MustParse("735a37ac-75c7-4bfc-96b2-f525c904b2b9")
+
+	r, _, _, err := local.New(&local.Config{
+		Path: path.Join("/Users/marty/src/tmp"),
+	})
+	require.NoError(t, err)
+
+	rr := backend.NewReader(r)
+	meta, err := rr.BlockMeta(ctx, blockID, tenantID)
+	require.NoError(t, err)
+
+	block := newBackendBlock(meta, rr)
+
+	type metrics struct {
+		count uint64
+		dur   uint64
+	}
+
+	//q := `{resource.service.name="tempo-gateway"}`
+	q := `{}`
+	groupBy := traceql.MustParseIdentifier("resource.cluster")
+	series := map[traceql.Static]*metrics{}
+
+	fmt.Println("Query:", q)
+	fmt.Println("GroupBy:", groupBy)
+
+	req := traceql.MustExtractFetchSpansRequest(q)
+	req.Conditions = append(req.Conditions, traceql.Condition{Attribute: traceql.NewIntrinsic(traceql.IntrinsicDuration)})
+	req.Conditions = append(req.Conditions, traceql.Condition{Attribute: groupBy})
+
+	req.Filter = func(ss *traceql.Spanset) ([]*traceql.Spanset, error) {
+		for _, s := range ss.Spans {
+			groupByValue := s.Attributes()[groupBy]
+			dur := s.EndtimeUnixNanos() - s.StartTimeUnixNanos()
+
+			m := series[groupByValue]
+			if m == nil {
+				m = &metrics{}
+				series[groupByValue] = m
+			}
+			m.count++
+			m.dur += dur
+		}
+		return nil, nil
+	}
+
+	opts := common.SearchOptions{}
+
+	res, err := block.Fetch(ctx, req, opts)
+	require.NoError(t, err)
+
+	for {
+		ss, err := res.Results.Next(ctx)
+		require.NoError(t, err)
+		if ss == nil {
+			break
+		}
+	}
+	fmt.Println("Results:")
+	for k, m := range series {
+		fmt.Printf("Series: %v\t\tCount:%d\t\tAvgDuration:%v\n", k, m.count, time.Duration(float64(m.dur)/float64(m.count)))
+	}
 }

@@ -641,10 +641,6 @@ func (c *SyncIterator) Close() {
 	c.closeCurrRowGroup()
 }
 
-func (c *SyncIterator) String() string {
-	return fmt.Sprintf("SyncIterator: %s \n\t%s", c.columnName, util.TabOut(c.filter))
-}
-
 // ColumnIterator asynchronously iterates through the given row groups and column. Applies
 // the optional predicate to each chunk, page, and value.  Results are read by calling
 // Next() until it returns nil.

@@ -74,6 +74,32 @@ func getSpan() *span {
 	return spanPool.Get().(*span)
 }
 
+var spanSlicePool = sync.Pool{
+	New: func() interface{} {
+		return make([]traceql.Span, 0)
+	},
+}
+
+var (
+	putCount = 0
+	getCount = 0
+)
+
+func putSpanSlice(s []traceql.Span) {
+	for k := range s {
+		s[k] = nil
+	}
+
+	spanSlicePool.Put(s[:0])
+	putCount++
+}
+
+func getSpanSlice() []traceql.Span {
+	ss := spanSlicePool.Get().([]traceql.Span)
+	getCount++
+	return ss
+}
+
 // Helper function to create an iterator, that abstracts away
 // context like file and rowgroups.
 type makeIterFn func(columnName string, predicate parquetquery.Predicate, selectAs string) parquetquery.Iterator
@@ -283,6 +309,7 @@ func (i *spansetIterator) Next() (*span, error) {
 				for _, s := range spanset.Spans {
 					putSpan(s.(*span))
 				}
+				putSpanSlice(spanset.Spans)
 			}
 		} else {
 			filteredSpansets = []*traceql.Spanset{spanset}
@@ -1167,7 +1194,7 @@ type batchCollector struct {
 
 	// shared static spans used in KeepGroup. done for memory savings, but won't
 	// work if the batchCollector is accessed concurrently
-	buffer []*span
+	buffer []traceql.Span
 }
 
 var _ parquetquery.GroupPredicate = (*batchCollector)(nil)
@@ -1219,31 +1246,43 @@ func (c *batchCollector) KeepGroup(res *parquetquery.IteratorResult) bool {
 	// Copy resource-level attributes to the individual spans now
 	for k, v := range resAttrs {
 		for _, span := range c.buffer {
-			if _, alreadyExists := span.attributes[k]; !alreadyExists {
-				span.attributes[k] = v
+			if _, alreadyExists := span.Attributes()[k]; !alreadyExists {
+				span.Attributes()[k] = v
 			}
 		}
 	}
 
 	// Remove unmatched attributes
 	for _, span := range c.buffer {
-		for k, v := range span.attributes {
+		for k, v := range span.Attributes() {
 			if v.Type == traceql.TypeNil {
-				delete(span.attributes, k)
+				delete(span.Attributes(), k)
 			}
 		}
 	}
 
-	filteredSpans := make([]traceql.Span, 0, len(c.buffer))
+	filteredSpans := getSpanSlice()
 
 	// Copy over only spans that met minimum criteria
 	if c.requireAtLeastOneMatchOverall {
+		anyToDrop := false
 		for _, span := range c.buffer {
-			if len(span.attributes) > 0 {
-				filteredSpans = append(filteredSpans, span)
-				continue
+			if len(span.Attributes()) == 0 {
+				anyToDrop = true
+				break
 			}
-			putSpan(span)
+		}
+
+		if anyToDrop {
+			for _, sp := range c.buffer {
+				if len(sp.Attributes()) > 0 {
+					filteredSpans = append(filteredSpans, sp)
+					continue
+				}
+				putSpan(sp.(*span))
+			}
+		} else {
+			filteredSpans = append(filteredSpans, c.buffer...)
 		}
 	} else {
 		//filteredSpans = make([]traceql.Span, 0, len(c.buffer))
@@ -1254,6 +1293,7 @@ func (c *batchCollector) KeepGroup(res *parquetquery.IteratorResult) bool {
 
 	// Throw out batches without any spans
 	if len(filteredSpans) == 0 {
+		putSpanSlice(filteredSpans)
 		return false
 	}
 
@@ -1282,10 +1322,12 @@ func (c *traceCollector) String() string {
 
 func (c *traceCollector) KeepGroup(res *parquetquery.IteratorResult) bool {
 	finalSpanset := &traceql.Spanset{}
+	finalSpanset.Spans = getSpanSlice()
 
 	for _, e := range res.OtherEntries {
 		if spanset, ok := e.Value.(*traceql.Spanset); ok {
 			finalSpanset.Spans = append(finalSpanset.Spans, spanset.Spans...)
+			putSpanSlice(spanset.Spans)
 		}
 	}
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"io"
+	"math"
 	"math/rand"
 	"os"
 	"path"
@@ -13,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dustin/go-humanize"
 	"github.com/google/uuid"
 	tempo_io "github.com/grafana/tempo/pkg/io"
 	"github.com/grafana/tempo/pkg/tempopb"
@@ -1022,15 +1025,13 @@ func TestDynamicMetricsOnExistingBlock(t *testing.T) {
 
 	block := newBackendBlock(meta, rr)
 
-	type metrics struct {
-		count uint64
-		dur   uint64
-	}
-
 	//q := `{resource.service.name="tempo-gateway"}`
 	q := `{}`
 	groupBy := traceql.MustParseIdentifier("resource.cluster")
 	series := map[traceql.Static]*metrics{}
+	//spanLimit := 10_000
+	spanLimit := 100_000
+	spanCount := 0
 
 	fmt.Println("Query:", q)
 	fmt.Println("GroupBy:", groupBy)
@@ -1049,9 +1050,14 @@ func TestDynamicMetricsOnExistingBlock(t *testing.T) {
 				m = &metrics{}
 				series[groupByValue] = m
 			}
-			m.count++
-			m.dur += dur
+			m.PutDurationNanos(dur)
+			spanCount++
 		}
+
+		if spanCount >= spanLimit {
+			return nil, io.EOF
+		}
+
 		return nil, nil
 	}
 
@@ -1068,7 +1074,117 @@ func TestDynamicMetricsOnExistingBlock(t *testing.T) {
 		}
 	}
 	fmt.Println("Results:")
-	for k, m := range series {
-		fmt.Printf("Series: %v\t\tCount:%d\t\tAvgDuration:%v\n", k, m.count, time.Duration(float64(m.dur)/float64(m.count)))
+	ks := []traceql.Static{}
+	for k := range series {
+		ks = append(ks, k)
 	}
+	sort.Slice(ks, func(i, j int) bool {
+		return strings.Compare(ks[i].String(), ks[j].String()) == -1
+	})
+	for _, k := range ks {
+		m := series[k]
+		fmt.Printf("Series: %v\t\tCount:%d\t\tAvg:%v\tp95: %v\tp95Est: %v\n", k,
+			m.Count(),
+			m.AvgDuration(),
+			m.Percentile(0.95),
+			m.PercentileEst(0.95),
+		)
+	}
+
+	fmt.Println("Spans matched:", spanCount)
+	fmt.Println("Bytes I/O:", humanize.Bytes(res.Bytes()))
+	fmt.Println("Pool Gets", getCount, "Puts", putCount)
+}
+
+/*type metrics struct {
+	count uint64
+	dur   uint64
+}
+
+func (m *metrics) PutDurationNanos(d uint64) {
+	m.count++
+	m.dur += d
+}
+
+func (m *metrics) Count() uint64 {
+	return m.count
+}
+
+func (m *metrics) AvgDuration() time.Duration {
+	return time.Duration(float64(m.dur) / float64(m.count))
+}*/
+
+type metrics struct {
+	durs []int
+}
+
+func (m *metrics) PutDurationNanos(d uint64) {
+	m.durs = append(m.durs, int(d))
+}
+
+func (m *metrics) Count() int {
+	return len(m.durs)
+}
+
+func (m *metrics) AvgDuration() time.Duration {
+	count := 0.0
+	total := 0.0
+
+	for _, dur := range m.durs {
+		count++
+		total += float64(dur)
+	}
+
+	return time.Duration(total / count)
+}
+
+func (m *metrics) Percentile(p float32) time.Duration {
+	sort.Ints(m.durs)
+
+	i := int(float32(len(m.durs)) * p)
+
+	return time.Duration(m.durs[i])
+}
+
+func (m *metrics) PercentileEst(p float32) time.Duration {
+
+	// Exponential buckets, powers of 2
+	buckets := [64]int{}
+
+	for _, dur := range m.durs {
+		var bucket int
+		if dur >= 2 {
+			bucket = int(math.Ceil(math.Log2(float64(dur))))
+		}
+		buckets[bucket]++
+	}
+
+	// Maximum amount of samples to include. We round up to better handle low
+	// percentiles on low sample counts (<100).
+	maxSamples := int(math.Round(float64(p) * float64(len(m.durs))))
+
+	// Find the bucket where the percentile falls in
+	// and the total sample count less than or equal
+	// to that bucket.
+	var total, bucket int
+	for b, count := range buckets {
+		if total+count < maxSamples {
+			bucket = b
+			total += count
+			continue
+		}
+
+		// We have enough
+		break
+	}
+
+	// Fraction to interpolate between buckets, sample-count wise.
+	// 0.5 means halfway
+	interp := float64(maxSamples-total) / float64(buckets[bucket+1])
+
+	// Exponential interpolation between buckets
+	minDur := math.Pow(2, float64(bucket))
+	dur := minDur * math.Pow(2, float64(interp))
+
+	return time.Duration(dur)
 }

@@ -3,6 +3,7 @@ package vparquet
 import (
 	"context"
 	"fmt"
+	"io"
 	"math"
 	"reflect"
 	"sort"
@@ -300,6 +301,9 @@ func (i *spansetIterator) Next() (*span, error) {
 		var filteredSpansets []*traceql.Spanset
 		if i.filter != nil {
 			filteredSpansets, err = i.filter(spanset)
+			if err == io.EOF {
+				return nil, nil
+			}
 			if err != nil {
 				return nil, err
 			}

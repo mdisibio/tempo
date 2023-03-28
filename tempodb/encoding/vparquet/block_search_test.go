@@ -1161,7 +1161,7 @@ func (m *metrics) PercentileEst(p float32) time.Duration {
 
 	// Maximum amount of samples to include. We round up to better handle low
 	// percentiles on low sample counts (<100).
-	maxSamples := int(math.Round(float64(p) * float64(len(m.durs))))
+	maxSamples := int(math.Ceil(float64(p) * float64(len(m.durs))))
 
 	// Find the bucket where the percentile falls in
 	// and the total sample count less than or equal

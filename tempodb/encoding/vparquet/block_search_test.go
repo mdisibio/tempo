@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dustin/go-humanize"
 	"github.com/google/uuid"
 	tempo_io "github.com/grafana/tempo/pkg/io"
 	"github.com/grafana/tempo/pkg/tempopb"
@@ -26,6 +25,7 @@ import (
 	"github.com/grafana/tempo/tempodb/backend"
 	"github.com/grafana/tempo/tempodb/backend/local"
 	"github.com/grafana/tempo/tempodb/encoding/common"
+	"github.com/pkg/errors"
 	"github.com/prometheus/common/model"
 	"github.com/segmentio/parquet-go"
 	"github.com/stretchr/testify/require"
@@ -1027,62 +1027,25 @@ func TestDynamicMetricsOnExistingBlock(t *testing.T) {
 
 	//q := `{resource.service.name="tempo-gateway"}`
 	q := `{}`
-	groupBy := traceql.MustParseIdentifier("resource.cluster")
-	series := map[traceql.Static]*metrics{}
-	//spanLimit := 10_000
-	spanLimit := 100_000
-	spanCount := 0
+	groupBy := `resource.cluster`
+	spanLimit := 100_000_000
 
-	fmt.Println("Query:", q)
-	fmt.Println("GroupBy:", groupBy)
-
-	req := traceql.MustExtractFetchSpansRequest(q)
-	req.Conditions = append(req.Conditions, traceql.Condition{Attribute: traceql.NewIntrinsic(traceql.IntrinsicDuration)})
-	req.Conditions = append(req.Conditions, traceql.Condition{Attribute: groupBy})
-
-	req.Filter = func(ss *traceql.Spanset) ([]*traceql.Spanset, error) {
-		for _, s := range ss.Spans {
-			groupByValue := s.Attributes()[groupBy]
-			dur := s.EndtimeUnixNanos() - s.StartTimeUnixNanos()
-
-			m := series[groupByValue]
-			if m == nil {
-				m = &metrics{}
-				series[groupByValue] = m
-			}
-			m.PutDurationNanos(dur)
-			spanCount++
-		}
-
-		if spanCount >= spanLimit {
-			return nil, io.EOF
-		}
-
-		return nil, nil
-	}
-
-	opts := common.SearchOptions{}
-
-	res, err := block.Fetch(ctx, req, opts)
+	res, err := GetMetrics(ctx, q, groupBy, spanLimit, block)
 	require.NoError(t, err)
 
-	for {
-		ss, err := res.Results.Next(ctx)
-		require.NoError(t, err)
-		if ss == nil {
-			break
-		}
-	}
 	fmt.Println("Results:")
+	if res.Estimated {
+		fmt.Println("------- ESTIMATED --------")
+	}
 	ks := []traceql.Static{}
-	for k := range series {
+	for k := range res.Series {
 		ks = append(ks, k)
 	}
 	sort.Slice(ks, func(i, j int) bool {
 		return strings.Compare(ks[i].String(), ks[j].String()) == -1
 	})
 	for _, k := range ks {
-		m := series[k]
+		m := res.Series[k]
 		fmt.Printf("Series: %v\t\tCount:%d\t\tAvg:%v\tp95: %v\tp95Est: %v\n", k,
 			m.Count(),
 			m.AvgDuration(),
@@ -1091,28 +1054,8 @@ func TestDynamicMetricsOnExistingBlock(t *testing.T) {
 		)
 	}
 
-	fmt.Println("Spans matched:", spanCount)
-	fmt.Println("Bytes I/O:", humanize.Bytes(res.Bytes()))
 	fmt.Println("Pool Gets", getCount, "Puts", putCount)
 }
-
-/*type metrics struct {
-	count uint64
-	dur   uint64
-}
-
-func (m *metrics) PutDurationNanos(d uint64) {
-	m.count++
-	m.dur += d
-}
-
-func (m *metrics) Count() uint64 {
-	return m.count
-}
-
-func (m *metrics) AvgDuration() time.Duration {
-	return time.Duration(float64(m.dur) / float64(m.count))
-}*/
 
 type metrics struct {
 	durs []int
@@ -1187,4 +1130,96 @@ func (m *metrics) PercentileEst(p float32) time.Duration {
 	dur := minDur * math.Pow(2, float64(interp))
 
 	return time.Duration(dur)
+}
+
+type MetricsResults struct {
+	Estimated bool
+	Series    map[traceql.Static]*metrics
+}
+
+func GetMetrics(ctx context.Context, query string, groupBy string, spanLimit int, block common.BackendBlock) (*MetricsResults, error) {
+	groupByAttr, err := traceql.ParseIdentifier("resource.cluster")
+	if err != nil {
+		return nil, errors.Wrap(err, "parsing groupby")
+	}
+
+	eval, req, err := traceql.NewEngine().Compile(query)
+	if err != nil {
+		return nil, errors.Wrap(err, "compiling query")
+	}
+
+	// Ensure that we select the span duration and group-by attribute
+	// if they are not already included in the query.
+	addConditionIfNotPresent := func(a traceql.Attribute) {
+		for _, c := range req.Conditions {
+			if c.Attribute == a {
+				return
+			}
+		}
+
+		req.Conditions = append(req.Conditions, traceql.Condition{Attribute: a})
+	}
+	addConditionIfNotPresent(traceql.NewIntrinsic(traceql.IntrinsicDuration))
+	addConditionIfNotPresent(groupByAttr)
+
+	// This filter callback processes the matching spans into the
+	// bucketed metrics.  It returns nil because we don't need any
+	// results after this.
+	spanCount := 0
+	series := map[traceql.Static]*metrics{}
+
+	req.Filter = func(in *traceql.Spanset) ([]*traceql.Spanset, error) {
+
+		// Run engine to assert final query conditions
+		out, err := eval([]*traceql.Spanset{in})
+		if err != nil {
+			return nil, err
+		}
+
+		for _, ss := range out {
+			for _, s := range ss.Spans {
+				groupByValue := s.Attributes()[groupByAttr]
+				dur := s.EndtimeUnixNanos() - s.StartTimeUnixNanos()
+
+				m := series[groupByValue]
+				if m == nil {
+					m = &metrics{}
+					series[groupByValue] = m
+				}
+				m.PutDurationNanos(dur)
+				spanCount++
+			}
+
+			if spanCount >= spanLimit {
+				return nil, io.EOF
+			}
+		}
+		return nil, nil
+	}
+
+	// Perform the fetch and process the results inside the Filter
+	// callback.  No actual results will be returned from this fetch call,
+	// But we still need to call Next() at least once.
+	res, err := block.Fetch(ctx, *req, common.SearchOptions{})
+	if err == common.ErrUnsupported {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	for {
+		ss, err := res.Results.Next(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if ss == nil {
+			break
+		}
+	}
+
+	return &MetricsResults{
+		Estimated: spanCount >= spanLimit,
+		Series:    series,
+	}, nil
 }

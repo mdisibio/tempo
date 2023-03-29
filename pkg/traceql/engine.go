@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/opentracing/opentracing-go"
+	"github.com/pkg/errors"
 
 	"github.com/grafana/tempo/pkg/tempopb"
 	common_v1 "github.com/grafana/tempo/pkg/tempopb/common/v1"
@@ -97,6 +98,20 @@ func (e *Engine) Execute(ctx context.Context, searchReq *tempopb.SearchRequest, 
 	span.SetTag("spansets_found", len(res.Traces))
 
 	return res, nil
+}
+
+func (e *Engine) Compile(query string) (func(input []*Spanset) (result []*Spanset, err error), *FetchSpansRequest, error) {
+	expr, err := Parse(query)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "parsing query")
+	}
+
+	req := &FetchSpansRequest{
+		AllConditions: true,
+	}
+	expr.Pipeline.extractConditions(req)
+
+	return expr.Pipeline.evaluate, req, nil
 }
 
 func (e *Engine) parseQuery(searchReq *tempopb.SearchRequest) (*RootExpr, error) {

@@ -155,6 +155,7 @@ var intrinsicColumnLookups = map[traceql.Intrinsic]struct {
 	traceql.IntrinsicName:     {traceql.AttributeScopeSpan, traceql.TypeString, columnPathSpanName},
 	traceql.IntrinsicStatus:   {traceql.AttributeScopeSpan, traceql.TypeStatus, columnPathSpanStatusCode},
 	traceql.IntrinsicDuration: {traceql.AttributeScopeSpan, traceql.TypeDuration, ""},
+	traceql.IntrinsicKind:     {traceql.AttributeScopeSpan, traceql.TypeKind, columnPathSpanKind},
 }
 
 // Lookup table of all well-known attributes with dedicated columns

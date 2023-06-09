@@ -101,9 +101,8 @@ type instance struct {
 
 	blocksMtx        sync.RWMutex
 	headBlock        common.WALBlock
-	completingBlocks []common.WALBlock
-	//completeBlocks   []*localBlock
-	completeBlocks *util.LockList[uuid.UUID, *localBlock]
+	completingBlocks *util.LockList[uuid.UUID, common.WALBlock]
+	completeBlocks   *util.LockList[uuid.UUID, *localBlock]
 
 	lastBlockCut time.Time
 
@@ -127,7 +126,8 @@ func newInstance(instanceID string, limiter *Limiter, writer tempodb.Writer, l *
 		traces:     map[uint32]*liveTrace{},
 		traceSizes: map[uint32]uint32{},
 
-		completeBlocks: util.NewLockList[uuid.UUID, *localBlock](),
+		completingBlocks: util.NewLockList[uuid.UUID, common.WALBlock](),
+		completeBlocks:   util.NewLockList[uuid.UUID, *localBlock](),
 
 		instanceID:         instanceID,
 		tracesCreatedTotal: metricTracesCreatedTotal.WithLabelValues(instanceID),
@@ -271,7 +271,8 @@ func (i *instance) CutBlockIfReady(maxBlockLifetime time.Duration, maxBlockBytes
 
 		completingBlock := i.headBlock
 
-		i.completingBlocks = append(i.completingBlocks, completingBlock)
+		//i.completingBlocks = append(i.completingBlocks, completingBlock)
+		i.completingBlocks.Add(completingBlock.BlockMeta().BlockID, completingBlock)
 
 		err = i.resetHeadBlock()
 		if err != nil {
@@ -286,7 +287,7 @@ func (i *instance) CutBlockIfReady(maxBlockLifetime time.Duration, maxBlockBytes
 
 // CompleteBlock moves a completingBlock to a completeBlock. The new completeBlock has the same ID.
 func (i *instance) CompleteBlock(blockID uuid.UUID) error {
-	i.blocksMtx.Lock()
+	/*i.blocksMtx.Lock()
 	var completingBlock common.WALBlock
 	for _, iterBlock := range i.completingBlocks {
 		if iterBlock.BlockMeta().BlockID == blockID {
@@ -294,11 +295,12 @@ func (i *instance) CompleteBlock(blockID uuid.UUID) error {
 			break
 		}
 	}
-	i.blocksMtx.Unlock()
-
-	if completingBlock == nil {
+	i.blocksMtx.Unlock()*/
+	completingBlock, release, ok := i.completingBlocks.Get(blockID)
+	if !ok {
 		return fmt.Errorf("error finding completingBlock")
 	}
+	defer release()
 
 	ctx := context.Background()
 
@@ -318,7 +320,7 @@ func (i *instance) CompleteBlock(blockID uuid.UUID) error {
 }
 
 func (i *instance) ClearCompletingBlock(blockID uuid.UUID) error {
-	i.blocksMtx.Lock()
+	/*i.blocksMtx.Lock()
 	defer i.blocksMtx.Unlock()
 
 	var completingBlock common.WALBlock
@@ -328,13 +330,16 @@ func (i *instance) ClearCompletingBlock(blockID uuid.UUID) error {
 			i.completingBlocks = append(i.completingBlocks[:j], i.completingBlocks[j+1:]...)
 			break
 		}
+	}*/
+
+	completingBlock, release, ok := i.completingBlocks.Remove(blockID)
+	if !ok {
+		return errors.New("Error finding wal completingBlock to clear")
 	}
 
-	if completingBlock != nil {
-		return completingBlock.Clear()
-	}
+	defer release()
 
-	return errors.New("Error finding wal completingBlock to clear")
+	return completingBlock.Clear()
 }
 
 // GetBlockToBeFlushed gets a list of blocks that can be flushed to the backend.
@@ -417,22 +422,28 @@ func (i *instance) FindTraceByID(ctx context.Context, id []byte) (*tempopb.Trace
 	}
 	i.tracesMtx.Unlock()
 
-	i.blocksMtx.RLock()
-	defer i.blocksMtx.RUnlock()
-
 	combiner := trace.NewCombiner()
 	combiner.Consume(completeTrace)
+
+	i.blocksMtx.RLock()
 
 	// headBlock
 	tr, err := i.headBlock.FindTraceByID(ctx, id, common.DefaultSearchOptions())
 	if err != nil {
+		i.blocksMtx.RUnlock()
 		return nil, fmt.Errorf("headBlock.FindTraceByID failed: %w", err)
 	}
+	i.blocksMtx.RUnlock()
 	combiner.Consume(tr)
 
 	// completingBlock
-	for _, c := range i.completingBlocks {
-		tr, err = c.FindTraceByID(ctx, id, common.DefaultSearchOptions())
+	walBlocks, cancel := i.completingBlocks.GetAll()
+	defer cancel()
+
+	for _, c := range walBlocks {
+		tr, err = c.Value.FindTraceByID(ctx, id, common.DefaultSearchOptions())
+		c.Release()
+
 		if err != nil {
 			return nil, fmt.Errorf("completingBlock.FindTraceByID failed: %w", err)
 		}
@@ -461,10 +472,11 @@ func (i *instance) FindTraceByID(ctx context.Context, id []byte) (*tempopb.Trace
 // This is used during wal replay. It is expected that calling code will add the appropriate
 // jobs to the queue to eventually flush these.
 func (i *instance) AddCompletingBlock(b common.WALBlock) {
-	i.blocksMtx.Lock()
+	/*i.blocksMtx.Lock()
 	defer i.blocksMtx.Unlock()
 
-	i.completingBlocks = append(i.completingBlocks, b)
+	i.completingBlocks = append(i.completingBlocks, b)*/
+	i.completingBlocks.Add(b.BlockMeta().BlockID, b)
 }
 
 // getOrCreateTrace will return a new trace object for the given request
@@ -550,14 +562,18 @@ func (i *instance) rediscoverLocalBlocks(ctx context.Context) ([]*localBlock, er
 	}
 
 	hasWal := func(id uuid.UUID) bool {
-		i.blocksMtx.RLock()
+		/*i.blocksMtx.RLock()
 		defer i.blocksMtx.RUnlock()
 		for _, b := range i.completingBlocks {
 			if b.BlockMeta().BlockID == id {
 				return true
 			}
 		}
-		return false
+		return false*/
+		_, release, ok := i.completingBlocks.Get(id)
+		defer release()
+
+		return ok
 	}
 
 	var rediscoveredBlocks []*localBlock

@@ -53,7 +53,7 @@ func TestInstance(t *testing.T) {
 
 	block, release := i.GetBlockToBeFlushed(blockID)
 	require.NotNil(t, block)
-	require.Len(t, i.completingBlocks, 1)
+	require.Equal(t, 1, i.completingBlocks.Len())
 	require.Equal(t, 1, i.completeBlocks.Len())
 
 	err = ingester.store.WriteBlock(context.Background(), block)

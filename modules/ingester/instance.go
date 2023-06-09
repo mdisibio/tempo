@@ -25,6 +25,7 @@ import (
 	"github.com/grafana/tempo/pkg/model"
 	"github.com/grafana/tempo/pkg/model/trace"
 	"github.com/grafana/tempo/pkg/tempopb"
+	"github.com/grafana/tempo/pkg/util"
 	"github.com/grafana/tempo/pkg/util/log"
 	"github.com/grafana/tempo/pkg/validation"
 	"github.com/grafana/tempo/tempodb"
@@ -101,7 +102,8 @@ type instance struct {
 	blocksMtx        sync.RWMutex
 	headBlock        common.WALBlock
 	completingBlocks []common.WALBlock
-	completeBlocks   []*localBlock
+	//completeBlocks   []*localBlock
+	completeBlocks *util.LockList[uuid.UUID, *localBlock]
 
 	lastBlockCut time.Time
 
@@ -124,6 +126,8 @@ func newInstance(instanceID string, limiter *Limiter, writer tempodb.Writer, l *
 	i := &instance{
 		traces:     map[uint32]*liveTrace{},
 		traceSizes: map[uint32]uint32{},
+
+		completeBlocks: util.NewLockList[uuid.UUID, *localBlock](),
 
 		instanceID:         instanceID,
 		tracesCreatedTotal: metricTracesCreatedTotal.WithLabelValues(instanceID),
@@ -305,9 +309,10 @@ func (i *instance) CompleteBlock(blockID uuid.UUID) error {
 
 	ingesterBlock := newLocalBlock(ctx, backendBlock, i.local)
 
-	i.blocksMtx.Lock()
+	/*i.blocksMtx.Lock()
 	i.completeBlocks = append(i.completeBlocks, ingesterBlock)
-	i.blocksMtx.Unlock()
+	i.blocksMtx.Unlock()*/
+	i.completeBlocks.Add(ingesterBlock.BlockMeta().BlockID, ingesterBlock)
 
 	return nil
 }
@@ -333,23 +338,28 @@ func (i *instance) ClearCompletingBlock(blockID uuid.UUID) error {
 }
 
 // GetBlockToBeFlushed gets a list of blocks that can be flushed to the backend.
-func (i *instance) GetBlockToBeFlushed(blockID uuid.UUID) *localBlock {
+func (i *instance) GetBlockToBeFlushed(blockID uuid.UUID) (*localBlock, func()) {
 	i.blocksMtx.RLock()
 	defer i.blocksMtx.RUnlock()
 
-	for _, c := range i.completeBlocks {
+	/*for _, c := range i.completeBlocks {
 		if c.BlockMeta().BlockID == blockID && c.FlushedTime().IsZero() {
 			return c
 		}
-	}
+	}*/
 
-	return nil
+	_, block, cancel, _ := i.completeBlocks.GetFirst(func(c *localBlock) bool {
+		return c.BlockMeta().BlockID == blockID && c.FlushedTime().IsZero()
+	})
+	//defer cancel()
+
+	return block, cancel
 }
 
 func (i *instance) ClearFlushedBlocks(completeBlockTimeout time.Duration) error {
 	var err error
 
-	i.blocksMtx.Lock()
+	/*i.blocksMtx.Lock()
 	defer i.blocksMtx.Unlock()
 
 	for idx, b := range i.completeBlocks {
@@ -366,6 +376,23 @@ func (i *instance) ClearFlushedBlocks(completeBlockTimeout time.Duration) error 
 				metricBlocksClearedTotal.Inc()
 			}
 			break
+		}
+	}*/
+
+	for {
+		id, _, cancel, ok := i.completeBlocks.RemoveFirst(func(b *localBlock) bool {
+			f := b.FlushedTime()
+			return !f.IsZero() && f.Add(completeBlockTimeout).Before(time.Now())
+		})
+		if !ok {
+			break
+		}
+
+		defer cancel()
+
+		err = i.local.ClearBlock(id, i.instanceID)
+		if err == nil {
+			metricBlocksClearedTotal.Inc()
 		}
 	}
 
@@ -413,8 +440,13 @@ func (i *instance) FindTraceByID(ctx context.Context, id []byte) (*tempopb.Trace
 	}
 
 	// completeBlock
-	for _, c := range i.completeBlocks {
-		found, err := c.FindTraceByID(ctx, id, common.DefaultSearchOptions())
+	blocks, cancel := i.completeBlocks.GetAll()
+	defer cancel()
+
+	for _, c := range blocks {
+		found, err := c.Value.FindTraceByID(ctx, id, common.DefaultSearchOptions())
+		c.Release()
+
 		if err != nil {
 			return nil, fmt.Errorf("completeBlock.FindTraceByID failed: %w", err)
 		}
@@ -569,9 +601,12 @@ func (i *instance) rediscoverLocalBlocks(ctx context.Context) ([]*localBlock, er
 		level.Info(log.Logger).Log("msg", "reloaded local block", "tenantID", i.instanceID, "block", id.String(), "flushed", ib.FlushedTime())
 	}
 
-	i.blocksMtx.Lock()
+	/*i.blocksMtx.Lock()
 	i.completeBlocks = append(i.completeBlocks, rediscoveredBlocks...)
-	i.blocksMtx.Unlock()
+	i.blocksMtx.Unlock()*/
+	for _, b := range rediscoveredBlocks {
+		i.completeBlocks.Add(b.BlockMeta().BlockID, b)
+	}
 
 	return rediscoveredBlocks, nil
 }

@@ -322,7 +322,9 @@ func (i *Ingester) handleFlush(ctx context.Context, userID string, blockID uuid.
 		return false, fmt.Errorf("instance id %s not found", userID)
 	}
 
-	if block := instance.GetBlockToBeFlushed(blockID); block != nil {
+	if block, release := instance.GetBlockToBeFlushed(blockID); block != nil {
+		defer release()
+
 		ctx := user.InjectOrgID(ctx, userID)
 		ctx, cancel := context.WithTimeout(ctx, i.cfg.FlushOpTimeout)
 		defer cancel()

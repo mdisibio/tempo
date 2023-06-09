@@ -140,10 +140,16 @@ func (i *instance) searchWAL(ctx context.Context, req *tempopb.SearchRequest, sr
 
 // searchLocalBlocks starts a search task for every local block. Must be called under lock.
 func (i *instance) searchLocalBlocks(ctx context.Context, req *tempopb.SearchRequest, sr *search.Results) {
+
+	blocks, cancel := i.completeBlocks.GetAll()
+	defer cancel()
+
 	// next check all complete blocks to see if they were not searched, if they weren't then attempt to search them
-	for _, e := range i.completeBlocks {
+	for _, e := range blocks {
 		sr.StartWorker()
-		go func(e *localBlock) {
+		go func(x *util.LockedEntry[*localBlock]) {
+			e := x.Value
+			defer x.Release()
 			defer sr.FinishWorker()
 
 			span, ctx := opentracing.StartSpanFromContext(ctx, "instance.searchLocalBlocks")
@@ -238,10 +244,15 @@ func (i *instance) SearchTags(ctx context.Context, scope string) (*tempopb.Searc
 			return nil, fmt.Errorf("unexpected error searching completing block (%s): %w", b.BlockMeta().BlockID, err)
 		}
 	}
-	for _, b := range i.completeBlocks {
+
+	blocks, cancel := i.completeBlocks.GetAll()
+	defer cancel()
+	for _, e := range blocks {
+		b := e.Value
 		if err = search(b, distinctValues); err != nil {
 			return nil, fmt.Errorf("unexpected error searching complete block (%s): %w", b.BlockMeta().BlockID, err)
 		}
+		e.Release()
 	}
 
 	if distinctValues.Exceeded() {
@@ -352,10 +363,16 @@ func (i *instance) SearchTagValues(ctx context.Context, tagName string) (*tempop
 			return nil, fmt.Errorf("unexpected error searching completing block (%s): %w", b.BlockMeta().BlockID, err)
 		}
 	}
-	for _, b := range i.completeBlocks {
+
+	blocks, cancel := i.completeBlocks.GetAll()
+	defer cancel()
+
+	for _, x := range blocks {
+		b := x.Value
 		if err = search(b, distinctValues); err != nil {
 			return nil, fmt.Errorf("unexpected error searching complete block (%s): %w", b.BlockMeta().BlockID, err)
 		}
+		x.Release()
 	}
 
 	if distinctValues.Exceeded() {
@@ -460,14 +477,18 @@ func (i *instance) SearchTagValuesV2(ctx context.Context, req *tempopb.SearchTag
 	defer i.blocksMtx.RUnlock()
 
 	// completed blocks
-	for _, b := range i.completeBlocks {
+	blocks, cancel := i.completeBlocks.GetAll()
+	defer cancel()
+
+	for _, x := range blocks {
 		wg.Add(1)
-		go func(b *localBlock) {
+		go func(x *util.LockedEntry[*localBlock]) {
+			defer x.Release()
 			defer wg.Done()
-			if err := searchBlock(b); err != nil {
-				anyErr.Store(fmt.Errorf("unexpected error searching complete block (%s): %w", b.BlockMeta().BlockID, err))
+			if err := searchBlock(x.Value); err != nil {
+				anyErr.Store(fmt.Errorf("unexpected error searching complete block (%s): %w", x.Value.BlockMeta().BlockID, err))
 			}
-		}(b)
+		}(x)
 	}
 
 	// completing blocks

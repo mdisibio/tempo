@@ -51,21 +51,23 @@ func TestInstance(t *testing.T) {
 	err = i.CompleteBlock(blockID)
 	require.NoError(t, err, "unexpected error completing block")
 
-	block := i.GetBlockToBeFlushed(blockID)
+	block, release := i.GetBlockToBeFlushed(blockID)
 	require.NotNil(t, block)
 	require.Len(t, i.completingBlocks, 1)
-	require.Len(t, i.completeBlocks, 1)
+	require.Equal(t, 1, i.completeBlocks.Len())
 
 	err = ingester.store.WriteBlock(context.Background(), block)
 	require.NoError(t, err)
 
+	release()
+
 	err = i.ClearFlushedBlocks(30 * time.Hour)
 	require.NoError(t, err)
-	require.Len(t, i.completeBlocks, 1)
+	require.Equal(t, 1, i.completeBlocks.Len())
 
 	err = i.ClearFlushedBlocks(0)
 	require.NoError(t, err)
-	require.Len(t, i.completeBlocks, 0)
+	require.Equal(t, 0, i.completeBlocks.Len())
 
 	err = i.resetHeadBlock()
 	require.NoError(t, err, "unexpected error resetting block")
@@ -111,11 +113,13 @@ func TestInstanceFind(t *testing.T) {
 
 	queryAll(t, i, ids, traces)
 
-	localBlock := i.GetBlockToBeFlushed(blockID)
+	localBlock, release := i.GetBlockToBeFlushed(blockID)
 	require.NotNil(t, localBlock)
 
 	err = ingester.store.WriteBlock(context.Background(), localBlock)
 	require.NoError(t, err)
+
+	release()
 
 	queryAll(t, i, ids, traces)
 }
@@ -184,10 +188,11 @@ func TestInstanceDoesNotRace(t *testing.T) {
 		if blockID != uuid.Nil {
 			err := i.CompleteBlock(blockID)
 			require.NoError(t, err, "unexpected error completing block")
-			block := i.GetBlockToBeFlushed(blockID)
+			block, release := i.GetBlockToBeFlushed(blockID)
 			require.NotNil(t, block)
 			err = ingester.store.WriteBlock(context.Background(), block)
 			require.NoError(t, err, "error writing block")
+			release()
 		}
 	})
 
@@ -630,7 +635,7 @@ func BenchmarkInstanceFindTraceByIDFromCompleteBlock(b *testing.B) {
 	err = instance.CompleteBlock(id)
 	require.NoError(b, err)
 
-	require.Equal(b, 1, len(instance.completeBlocks))
+	require.Equal(b, 1, instance.completeBlocks.Len())
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -665,7 +670,7 @@ func benchmarkInstanceSearch(b testing.TB) {
 	err = instance.CompleteBlock(id)
 	require.NoError(b, err)
 
-	require.Equal(b, 1, len(instance.completeBlocks))
+	require.Equal(b, 1, instance.completeBlocks.Len())
 
 	ctx := context.Background()
 	ctx = user.InjectOrgID(ctx, testTenantID)

@@ -165,7 +165,7 @@ func TestWal(t *testing.T) {
 	}
 
 	require.Len(t, ingester.instances["test"].completingBlocks, 0)
-	require.Len(t, ingester.instances["test"].completeBlocks, 1)
+	require.Equal(t, 1, ingester.instances["test"].completeBlocks.Len())
 
 	// should be able to find old traces that were replayed
 	for i, traceID := range traceIDs {

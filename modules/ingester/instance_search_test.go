@@ -561,10 +561,11 @@ func TestInstanceSearchDoesNotRace(t *testing.T) {
 			require.NoError(t, err)
 			err = i.ClearCompletingBlock(blockID)
 			require.NoError(t, err)
-			block := i.GetBlockToBeFlushed(blockID)
+			block, release := i.GetBlockToBeFlushed(blockID)
 			require.NotNil(t, block)
 			err = ingester.store.WriteBlock(context.Background(), block)
 			require.NoError(t, err)
+			release()
 		}
 	})
 

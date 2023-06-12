@@ -758,7 +758,7 @@ func BenchmarkInstanceContention(t *testing.B) {
 		}
 	}
 	go concurrent(func() {
-		request := makeRequest([]byte{})
+		request := makeRequestWithByteLimit(10_000, nil)
 		err := i.PushBytesRequest(ctx, request)
 		require.NoError(t, err, "error pushing traces")
 		pushes++
@@ -775,6 +775,8 @@ func BenchmarkInstanceContention(t *testing.B) {
 		if blockID != uuid.Nil {
 			err := i.CompleteBlock(blockID)
 			require.NoError(t, err, "unexpected error completing block")
+			err = i.ClearCompletingBlock(blockID)
+			require.NoError(t, err, "unexpected error clearing wal block")
 			block, release := i.GetBlockToBeFlushed(blockID)
 			require.NotNil(t, block)
 			err = ingester.store.WriteBlock(ctx, block)

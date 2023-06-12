@@ -99,7 +99,7 @@ type instance struct {
 	traceSizes map[uint32]uint32
 	traceCount atomic.Int32
 
-	blocksMtx        sync.RWMutex
+	headblockMtx     sync.RWMutex
 	headBlock        common.WALBlock
 	completingBlocks *util.LockList[uuid.UUID, common.WALBlock]
 	completeBlocks   *util.LockList[uuid.UUID, *localBlock]
@@ -245,16 +245,16 @@ func (i *instance) CutCompleteTraces(cutoff time.Duration, immediate bool) error
 		tempopb.ReuseByteSlices(t.batches)
 	}
 
-	i.blocksMtx.Lock()
-	defer i.blocksMtx.Unlock()
+	i.headblockMtx.Lock()
+	defer i.headblockMtx.Unlock()
 	return i.headBlock.Flush()
 }
 
 // CutBlockIfReady cuts a completingBlock from the HeadBlock if ready.
 // Returns the ID of a block if one was cut or a nil ID if one was not cut, along with the error (if any).
 func (i *instance) CutBlockIfReady(maxBlockLifetime time.Duration, maxBlockBytes uint64, immediate bool) (uuid.UUID, error) {
-	i.blocksMtx.Lock()
-	defer i.blocksMtx.Unlock()
+	i.headblockMtx.Lock()
+	defer i.headblockMtx.Unlock()
 
 	if i.headBlock == nil || i.headBlock.DataLength() == 0 {
 		return uuid.Nil, nil
@@ -270,8 +270,6 @@ func (i *instance) CutBlockIfReady(maxBlockLifetime time.Duration, maxBlockBytes
 		}
 
 		completingBlock := i.headBlock
-
-		//i.completingBlocks = append(i.completingBlocks, completingBlock)
 		i.completingBlocks.Add(completingBlock.BlockMeta().BlockID, completingBlock)
 
 		err = i.resetHeadBlock()
@@ -367,43 +365,42 @@ func (i *instance) FindTraceByID(ctx context.Context, id []byte) (*tempopb.Trace
 	combiner := trace.NewCombiner()
 	combiner.Consume(completeTrace)
 
-	i.blocksMtx.RLock()
+	find := func(f common.Finder, cleanup func()) error {
+		defer cleanup()
+
+		tr, err := f.FindTraceByID(ctx, id, common.DefaultSearchOptions())
+		if err != nil {
+			return err
+		}
+
+		combiner.Consume(tr)
+		return nil
+	}
 
 	// headBlock
-	tr, err := i.headBlock.FindTraceByID(ctx, id, common.DefaultSearchOptions())
-	if err != nil {
-		i.blocksMtx.RUnlock()
+	i.headblockMtx.RLock()
+	if err := find(i.headBlock, i.headblockMtx.RUnlock); err != nil {
 		return nil, fmt.Errorf("headBlock.FindTraceByID failed: %w", err)
 	}
-	i.blocksMtx.RUnlock()
-	combiner.Consume(tr)
 
 	// completingBlock
-	walBlocks, cancel := i.completingBlocks.GetAll()
-	defer cancel()
+	walBlocks, cleanup := i.completingBlocks.GetAll()
+	defer cleanup()
 
 	for _, c := range walBlocks {
-		tr, err = c.Value.FindTraceByID(ctx, id, common.DefaultSearchOptions())
-		c.Release()
-
-		if err != nil {
+		if err := find(c.Value, c.Release); err != nil {
 			return nil, fmt.Errorf("completingBlock.FindTraceByID failed: %w", err)
 		}
-		combiner.Consume(tr)
 	}
 
 	// completeBlock
-	blocks, cancel := i.completeBlocks.GetAll()
-	defer cancel()
+	blocks, cleanup := i.completeBlocks.GetAll()
+	defer cleanup()
 
 	for _, c := range blocks {
-		found, err := c.Value.FindTraceByID(ctx, id, common.DefaultSearchOptions())
-		c.Release()
-
-		if err != nil {
+		if err := find(c.Value, c.Release); err != nil {
 			return nil, fmt.Errorf("completeBlock.FindTraceByID failed: %w", err)
 		}
-		combiner.Consume(found)
 	}
 
 	result, _ := combiner.Result()
@@ -486,8 +483,8 @@ func (i *instance) tracesToCut(cutoff time.Duration, immediate bool) []*liveTrac
 }
 
 func (i *instance) writeTraceToHeadBlock(id common.ID, b []byte, start, end uint32) error {
-	i.blocksMtx.Lock()
-	defer i.blocksMtx.Unlock()
+	i.headblockMtx.Lock()
+	defer i.headblockMtx.Unlock()
 
 	err := i.headBlock.Append(id, b, start, end)
 	if err != nil {

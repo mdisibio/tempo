@@ -44,10 +44,8 @@ func (i *instance) Search(ctx context.Context, req *tempopb.SearchRequest) (*tem
 	// Lock blocks mutex until all search tasks have been created. This avoids
 	// deadlocking with other activity (ingest, flushing), caused by releasing
 	// and then attempting to retake the lock.
-	i.blocksMtx.RLock()
 	i.searchWAL(ctx, req, sr)
 	i.searchLocalBlocks(ctx, req, sr)
-	i.blocksMtx.RUnlock()
 
 	sr.AllWorkersStarted()
 
@@ -128,9 +126,10 @@ func (i *instance) searchWAL(ctx context.Context, req *tempopb.SearchRequest, sr
 	}
 
 	// head block
+	i.headblockMtx.RLock()
 	if i.headBlock != nil {
 		sr.StartWorker()
-		go searchWalBlock(i.headBlock, func() {})
+		go searchWalBlock(i.headBlock, i.headblockMtx.RUnlock)
 	}
 
 	// completing blocks
@@ -220,7 +219,9 @@ func (i *instance) SearchTags(ctx context.Context, scope string) (*tempopb.Searc
 	limit := i.limiter.limits.MaxBytesPerTagValuesQuery(userID)
 	distinctValues := util.NewDistinctStringCollector(limit)
 
-	search := func(s common.Searcher, dv *util.DistinctStringCollector) error {
+	search := func(s common.Searcher, dv *util.DistinctStringCollector, cleanup func()) error {
+		defer cleanup()
+
 		if s == nil {
 			return nil
 		}
@@ -235,33 +236,26 @@ func (i *instance) SearchTags(ctx context.Context, scope string) (*tempopb.Searc
 		return nil
 	}
 
-	i.blocksMtx.RLock()
-	defer i.blocksMtx.RUnlock()
-
-	// search parquet wal/completing blocks/completed blocks
-	if err = search(i.headBlock, distinctValues); err != nil {
+	i.headblockMtx.RLock()
+	if err = search(i.headBlock, distinctValues, i.headblockMtx.RUnlock); err != nil {
 		return nil, fmt.Errorf("unexpected error searching head block (%s): %w", i.headBlock.BlockMeta().BlockID, err)
 	}
 
-	walBlocks, cancel := i.completingBlocks.GetAll()
-	defer cancel()
+	walBlocks, cleanup := i.completingBlocks.GetAll()
+	defer cleanup()
 
 	for _, x := range walBlocks {
-		b := x.Value
-		if err = search(b, distinctValues); err != nil {
-			return nil, fmt.Errorf("unexpected error searching completing block (%s): %w", b.BlockMeta().BlockID, err)
+		if err = search(x.Value, distinctValues, x.Release); err != nil {
+			return nil, fmt.Errorf("unexpected error searching completing block (%s): %w", x.Value.BlockMeta().BlockID, err)
 		}
-		x.Release()
 	}
 
-	blocks, cancel := i.completeBlocks.GetAll()
-	defer cancel()
+	blocks, cleanup := i.completeBlocks.GetAll()
+	defer cleanup()
 	for _, e := range blocks {
-		b := e.Value
-		if err = search(b, distinctValues); err != nil {
-			return nil, fmt.Errorf("unexpected error searching complete block (%s): %w", b.BlockMeta().BlockID, err)
+		if err = search(e.Value, distinctValues, e.Release); err != nil {
+			return nil, fmt.Errorf("unexpected error searching complete block (%s): %w", e.Value.BlockMeta().BlockID, err)
 		}
-		e.Release()
 	}
 
 	if distinctValues.Exceeded() {
@@ -339,7 +333,9 @@ func (i *instance) SearchTagValues(ctx context.Context, tagName string) (*tempop
 		maxBlocks = limit
 	}
 
-	search := func(s common.Searcher, dv *util.DistinctStringCollector) error {
+	search := func(s common.Searcher, dv *util.DistinctStringCollector, cleanup func()) error {
+		defer cleanup()
+
 		if maxBlocks > 0 && inspectedBlocks >= maxBlocks {
 			return nil
 		}
@@ -360,36 +356,27 @@ func (i *instance) SearchTagValues(ctx context.Context, tagName string) (*tempop
 		return nil
 	}
 
-	i.blocksMtx.RLock()
-	//defer i.blocksMtx.RUnlock()
-
-	// search parquet wal/completing blocks/completed blocks
-	if err = search(i.headBlock, distinctValues); err != nil {
-		i.blocksMtx.RUnlock()
+	i.headblockMtx.RLock()
+	if err = search(i.headBlock, distinctValues, i.headblockMtx.RUnlock); err != nil {
 		return nil, fmt.Errorf("unexpected error searching head block (%s): %w", i.headBlock.BlockMeta().BlockID, err)
 	}
-	i.blocksMtx.RUnlock()
 
-	walBlocks, cancel := i.completingBlocks.GetAll()
-	defer cancel()
+	walBlocks, cleanup := i.completingBlocks.GetAll()
+	defer cleanup()
 
 	for _, x := range walBlocks {
-		b := x.Value
-		if err = search(b, distinctValues); err != nil {
-			return nil, fmt.Errorf("unexpected error searching completing block (%s): %w", b.BlockMeta().BlockID, err)
+		if err = search(x.Value, distinctValues, x.Release); err != nil {
+			return nil, fmt.Errorf("unexpected error searching completing block (%s): %w", x.Value.BlockMeta().BlockID, err)
 		}
-		x.Release()
 	}
 
-	blocks, cancel := i.completeBlocks.GetAll()
-	defer cancel()
+	blocks, cleanup := i.completeBlocks.GetAll()
+	defer cleanup()
 
 	for _, x := range blocks {
-		b := x.Value
-		if err = search(b, distinctValues); err != nil {
-			return nil, fmt.Errorf("unexpected error searching complete block (%s): %w", b.BlockMeta().BlockID, err)
+		if err = search(x.Value, distinctValues, x.Release); err != nil {
+			return nil, fmt.Errorf("unexpected error searching complete block (%s): %w", x.Value.BlockMeta().BlockID, err)
 		}
-		x.Release()
 	}
 
 	if distinctValues.Exceeded() {
@@ -489,9 +476,6 @@ func (i *instance) SearchTagValuesV2(ctx context.Context, req *tempopb.SearchTag
 			return s.SearchTagValuesV2(ctx, tag, cb, common.DefaultSearchOptions())
 		}
 	}
-
-	i.blocksMtx.RLock()
-	defer i.blocksMtx.RUnlock()
 
 	// completed blocks
 	blocks, cancel := i.completeBlocks.GetAll()

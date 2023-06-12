@@ -287,15 +287,6 @@ func (i *instance) CutBlockIfReady(maxBlockLifetime time.Duration, maxBlockBytes
 
 // CompleteBlock moves a completingBlock to a completeBlock. The new completeBlock has the same ID.
 func (i *instance) CompleteBlock(blockID uuid.UUID) error {
-	/*i.blocksMtx.Lock()
-	var completingBlock common.WALBlock
-	for _, iterBlock := range i.completingBlocks {
-		if iterBlock.BlockMeta().BlockID == blockID {
-			completingBlock = iterBlock
-			break
-		}
-	}
-	i.blocksMtx.Unlock()*/
 	completingBlock, release, ok := i.completingBlocks.Get(blockID)
 	if !ok {
 		return fmt.Errorf("error finding completingBlock")
@@ -310,53 +301,26 @@ func (i *instance) CompleteBlock(blockID uuid.UUID) error {
 	}
 
 	ingesterBlock := newLocalBlock(ctx, backendBlock, i.local)
-
-	/*i.blocksMtx.Lock()
-	i.completeBlocks = append(i.completeBlocks, ingesterBlock)
-	i.blocksMtx.Unlock()*/
 	i.completeBlocks.Add(ingesterBlock.BlockMeta().BlockID, ingesterBlock)
 
 	return nil
 }
 
 func (i *instance) ClearCompletingBlock(blockID uuid.UUID) error {
-	/*i.blocksMtx.Lock()
-	defer i.blocksMtx.Unlock()
 
-	var completingBlock common.WALBlock
-	for j, iterBlock := range i.completingBlocks {
-		if iterBlock.BlockMeta().BlockID == blockID {
-			completingBlock = iterBlock
-			i.completingBlocks = append(i.completingBlocks[:j], i.completingBlocks[j+1:]...)
-			break
-		}
-	}*/
-
-	completingBlock, release, ok := i.completingBlocks.Remove(blockID)
+	completingBlock, ok := i.completingBlocks.Remove(blockID)
 	if !ok {
 		return errors.New("Error finding wal completingBlock to clear")
 	}
-
-	defer release()
 
 	return completingBlock.Clear()
 }
 
 // GetBlockToBeFlushed gets a list of blocks that can be flushed to the backend.
 func (i *instance) GetBlockToBeFlushed(blockID uuid.UUID) (*localBlock, func()) {
-	i.blocksMtx.RLock()
-	defer i.blocksMtx.RUnlock()
-
-	/*for _, c := range i.completeBlocks {
-		if c.BlockMeta().BlockID == blockID && c.FlushedTime().IsZero() {
-			return c
-		}
-	}*/
-
 	_, block, cancel, _ := i.completeBlocks.GetFirst(func(c *localBlock) bool {
 		return c.BlockMeta().BlockID == blockID && c.FlushedTime().IsZero()
 	})
-	//defer cancel()
 
 	return block, cancel
 }
@@ -364,36 +328,14 @@ func (i *instance) GetBlockToBeFlushed(blockID uuid.UUID) (*localBlock, func()) 
 func (i *instance) ClearFlushedBlocks(completeBlockTimeout time.Duration) error {
 	var err error
 
-	/*i.blocksMtx.Lock()
-	defer i.blocksMtx.Unlock()
-
-	for idx, b := range i.completeBlocks {
-		flushedTime := b.FlushedTime()
-		if flushedTime.IsZero() {
-			continue
-		}
-
-		if flushedTime.Add(completeBlockTimeout).Before(time.Now()) {
-			i.completeBlocks = append(i.completeBlocks[:idx], i.completeBlocks[idx+1:]...)
-
-			err = i.local.ClearBlock(b.BlockMeta().BlockID, i.instanceID)
-			if err == nil {
-				metricBlocksClearedTotal.Inc()
-			}
-			break
-		}
-	}*/
-
 	for {
-		id, _, cancel, ok := i.completeBlocks.RemoveFirst(func(b *localBlock) bool {
+		id, _, ok := i.completeBlocks.RemoveFirst(func(b *localBlock) bool {
 			f := b.FlushedTime()
 			return !f.IsZero() && f.Add(completeBlockTimeout).Before(time.Now())
 		})
 		if !ok {
 			break
 		}
-
-		defer cancel()
 
 		err = i.local.ClearBlock(id, i.instanceID)
 		if err == nil {

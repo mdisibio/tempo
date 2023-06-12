@@ -27,7 +27,7 @@ func NewLockList[K comparable, V any]() *LockList[K, V] {
 	}
 }
 
-// Add element to the list. Panics if the element already exists.
+// Add element to the list in an unlocked state. Panics if the element already exists.
 func (l *LockList[K, V]) Add(key K, val V) {
 	l.mtx.Lock()
 	defer l.mtx.Unlock()
@@ -55,11 +55,9 @@ func (l *LockList[K, V]) Get(key K) (V, func(), bool) {
 	return e.val, e.mtx.RUnlock, true
 }
 
-// Remove element with the given key and return it under write lock. Panics
+// Remove element with the given key and after acquiring its write lock. Panics
 // if the element does not exist.
-// TODO - Do we actually need to return the element under lock here?  Once its outside
-// the list what is the purpose of maintaining the lock.
-func (l *LockList[K, V]) Remove(key K) (V, func(), bool) {
+func (l *LockList[K, V]) Remove(key K) (V, bool) {
 	l.mtx.Lock()
 	defer l.mtx.Unlock()
 
@@ -71,7 +69,7 @@ func (l *LockList[K, V]) Remove(key K) (V, func(), bool) {
 	e.mtx.Lock()
 	delete(l.entries, key)
 
-	return e.val, e.mtx.Unlock, true
+	return e.val, true
 }
 
 // GetFirst element that matches the given selector and return it under read lock.
@@ -95,10 +93,9 @@ func (l *LockList[K, V]) GetFirst(selector func(val V) bool) (K, V, func(), bool
 	return defaultK, defaultV, func() {}, false
 }
 
-// RemoveFirst element that matches the given selector and returns it under write lock.
-// TODO - Do we actually need to return the element under lock here?  Once its outside
-// the list what is the purpose of maintaining the lock.
-func (l *LockList[K, V]) RemoveFirst(selector func(val V) bool) (K, V, func(), bool) {
+// RemoveFirst element that matches the given selector and returns it
+// acquiring its write lock.
+func (l *LockList[K, V]) RemoveFirst(selector func(val V) bool) (K, V, bool) {
 	l.mtx.Lock()
 	defer l.mtx.Unlock()
 
@@ -107,7 +104,7 @@ func (l *LockList[K, V]) RemoveFirst(selector func(val V) bool) (K, V, func(), b
 
 		if selector(e.val) {
 			delete(l.entries, k)
-			return k, e.val, e.mtx.Unlock, true
+			return k, e.val, true
 		}
 
 		e.mtx.Unlock()
@@ -115,7 +112,7 @@ func (l *LockList[K, V]) RemoveFirst(selector func(val V) bool) (K, V, func(), b
 
 	var defaultK K
 	var defaultV V
-	return defaultK, defaultV, func() {}, false
+	return defaultK, defaultV, false
 }
 
 // GetAll elements in the list with read locks.  Individual elements can be unlocked by

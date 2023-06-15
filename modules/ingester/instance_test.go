@@ -732,7 +732,7 @@ func makePushBytesRequest(traceID []byte, batch *v1_trace.ResourceSpans) *tempop
 
 func BenchmarkInstanceContention(t *testing.B) {
 	var (
-		ctx          = context.Background()
+		ctx          = user.InjectOrgID(context.Background(), testTenantID)
 		end          = make(chan struct{})
 		wg           = sync.WaitGroup{}
 		pushes       = 0
@@ -741,6 +741,8 @@ func BenchmarkInstanceContention(t *testing.B) {
 		retentions   = 0
 		finds        = 0
 		searches     = 0
+		searchBytes  = 0
+		searchTags   = 0
 	)
 
 	i, ingester := defaultInstance(t)
@@ -799,11 +801,18 @@ func BenchmarkInstanceContention(t *testing.B) {
 	})
 
 	go concurrent(func() {
-		_, err := i.Search(ctx, &tempopb.SearchRequest{
+		x, err := i.Search(ctx, &tempopb.SearchRequest{
 			Query: "{ .foo=`bar` }",
 		})
 		require.NoError(t, err, "error searching traceql")
+		searchBytes += int(x.Metrics.InspectedBytes)
 		searches++
+	})
+
+	go concurrent(func() {
+		_, err := i.SearchTags(ctx, "")
+		require.NoError(t, err, "error searching tags")
+		searchTags++
 	})
 
 	time.Sleep(2 * time.Second)
@@ -820,4 +829,6 @@ func BenchmarkInstanceContention(t *testing.B) {
 	report(retentions, "retentions")
 	report(finds, "finds")
 	report(searches, "searches")
+	report(searchBytes, "searchedBytes")
+	report(searchTags, "searchTags")
 }

@@ -34,6 +34,7 @@ service StreamingQuerier {
 
 service Metrics {
   rpc SpanMetricsSummary(SpanMetricsSummaryRequest) returns (SpanMetricsSummaryResponse) {}
+  rpc SpanMetricsMegaSelect(SpanMetricsMegaSelectRequest) returns (SpanMetricsMegaSelectResponse) {}
 }
 
 // Read
@@ -268,4 +269,40 @@ message TraceQLStatic {
   uint64 d = 6;
   int32 status = 7;
   int32 kind = 8;
+}
+
+// mega select proto. designed to mock the prom range queries response
+// https://prometheus.io/docs/prometheus/latest/querying/api/#range-queries
+message SpanMetricsMegaSelectRequest {
+  enum Metric {
+    P99 = 0;
+    P90 = 1;
+    P50 = 2;
+    ERRORRATE = 3;
+  }
+  Metric metric = 1;
+  string query = 2;
+  uint32 start = 3;
+  uint32 end = 4;
+}
+
+message SpanMetricsMegaSelectResponse {
+  string status = 1;
+  SpanMetricsMegaSelectData data = 2;
+}
+
+message SpanMetricsMegaSelectData {
+  string resultType = 1;
+  repeated SpanMetricsMegaSelectResult result = 2;
+}
+
+message SpanMetricsMegaSelectResult {
+  string labelName = 1;  // if these are empty it is the primary trend
+  string labelValue = 2;
+  repeated SpanMetricsMegaSelectResultPoint ts = 3;
+}
+
+message SpanMetricsMegaSelectResultPoint {
+  uint32 time = 1;
+  double val = 2; 
 }

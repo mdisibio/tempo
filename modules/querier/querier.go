@@ -3,6 +3,7 @@ package querier
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"sort"
 	"sync"
@@ -695,6 +696,138 @@ func (q *Querier) SpanMetricsSummary(
 	resp := &tempopb.SpanMetricsSummaryResponse{}
 	for _, x := range xxx {
 		resp.Summaries = append(resp.Summaries, x)
+	}
+
+	return resp, nil
+}
+
+func (q *Querier) SpanMetricsMegaSelect(ctx context.Context, req *tempopb.SpanMetricsMegaSelectRequest) (*tempopb.SpanMetricsMegaSelectResponse, error) {
+	// TODO: somehow ask the generators for mega select metrics
+
+	// genReq := &tempopb.SpanMetricsRequest{
+	// 	Query:   req.Query,
+	// 	GroupBy: req.GroupBy, // pass * or something to indicate all?
+	// 	Start:   req.Start,
+	// 	End:     req.End,
+	// 	Limit:   0,
+	// }
+
+	// // Get results from all generators
+	// replicationSet, err := q.generatorRing.GetReplicationSetForOperation(ring.Read)
+	// if err != nil {
+	// 	return nil, errors.Wrap(err, "error finding generators in Querier.SpanMetricsSummary")
+	// }
+	// lookupResults, err := q.forGivenGenerators(
+	// 	ctx,
+	// 	replicationSet,
+	// 	func(ctx context.Context, client tempopb.MetricsGeneratorClient) (interface{}, error) {
+	// 		return client.GetMetrics(ctx, genReq)
+	// 	},
+	// )
+	// if err != nil {
+	// 	return nil, errors.Wrap(err, "error querying generators in Querier.SpanMetricsSummary")
+	// }
+
+	// // Assemble the results from the generators in the pool
+	// results := make([]*tempopb.SpanMetricsResponse, 0, len(lookupResults))
+	// for _, result := range lookupResults {
+	// 	results = append(results, result.response.(*tempopb.SpanMetricsResponse))
+	// }
+
+	// // Combine the results
+	// yyy := make(map[traceqlmetrics.MetricSeries]*traceqlmetrics.LatencyHistogram)
+	// xxx := make(map[traceqlmetrics.MetricSeries]*tempopb.SpanMetricsSummary)
+
+	// var h *traceqlmetrics.LatencyHistogram
+	// var s traceqlmetrics.MetricSeries
+	// for _, r := range results {
+	// 	for _, m := range r.Metrics {
+	// 		s = protoToMetricSeries(m.Series)
+
+	// 		if _, ok := xxx[s]; !ok {
+	// 			xxx[s] = &tempopb.SpanMetricsSummary{Series: m.Series}
+	// 		}
+
+	// 		xxx[s].ErrorSpanCount += m.Errors
+
+	// 		var b [64]int
+	// 		for _, l := range m.GetLatencyHistogram() {
+	// 			// Reconstitude the bucket
+	// 			b[l.Bucket] += int(l.Count)
+	// 			// Add to the total
+	// 			xxx[s].SpanCount += l.Count
+	// 		}
+
+	// 		// Combine the histogram
+	// 		h = traceqlmetrics.New(b)
+	// 		if _, ok := yyy[s]; !ok {
+	// 			yyy[s] = h
+	// 		} else {
+	// 			yyy[s].Combine(*h)
+	// 		}
+	// 	}
+	// }
+
+	// for s, h := range yyy {
+	// 	xxx[s].P50 = h.Percentile(0.5)
+	// 	xxx[s].P90 = h.Percentile(0.9)
+	// 	xxx[s].P95 = h.Percentile(0.95)
+	// 	xxx[s].P99 = h.Percentile(0.99)
+	// }
+
+	// resp := &tempopb.SpanMetricsSummaryResponse{}
+	// for _, x := range xxx {
+	// 	resp.Summaries = append(resp.Summaries, x)
+	// }
+
+	resp := &tempopb.SpanMetricsMegaSelectResponse{
+		Status: "success",
+		Data: &tempopb.SpanMetricsMegaSelectData{
+			ResultType: "matrix",
+			Result:     nil,
+		},
+	}
+
+	// add some fake series
+	resp.Data.Result = []*tempopb.SpanMetricsMegaSelectResult{
+		{
+			LabelName:  "", // this is the primary series
+			LabelValue: "",
+		},
+		// grouped in ui
+		{
+			LabelName:  "namespace",
+			LabelValue: "prod",
+		},
+		{
+			LabelName:  "namespace",
+			LabelValue: "dev",
+		},
+		// grouped in ui
+		{
+			LabelName:  "cluster",
+			LabelValue: "foo",
+		},
+		{
+			LabelName:  "cluster",
+			LabelValue: "bar",
+		},
+		{
+			LabelName:  "cluster",
+			LabelValue: "baz",
+		},
+	}
+
+	// create fake data for now
+	for _, r := range resp.Data.Result {
+		for ts := req.Start; ts < req.End; ts += 15 {
+			ts := &tempopb.SpanMetricsMegaSelectResultPoint{
+				Time: ts,
+				Val:  rand.Float64() * 100,
+			}
+
+			r.Ts = append(r.Ts, ts)
+		}
 	}
 
 	return resp, nil

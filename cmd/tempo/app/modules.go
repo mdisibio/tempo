@@ -343,6 +343,9 @@ func (t *App) initQuerier() (services.Service, error) {
 	spanMetricsSummaryHandler := t.HTTPAuthMiddleware.Wrap(http.HandlerFunc(t.querier.SpanMetricsSummaryHandler))
 	t.Server.HTTP.Handle(path.Join(api.PathPrefixQuerier, addHTTPAPIPrefix(&t.cfg, api.PathSpanMetricsSummary)), spanMetricsSummaryHandler)
 
+	spanMetricsMegaSelectHandler := t.HTTPAuthMiddleware.Wrap(http.HandlerFunc(t.querier.SpanMetricsMegaSelectHandler))
+	t.Server.HTTP.Handle(path.Join(api.PathPrefixQuerier, addHTTPAPIPrefix(&t.cfg, api.PathSpanMetricsMegaSelect)), spanMetricsMegaSelectHandler)
+
 	return t.querier, t.querier.CreateAndRegisterWorker(t.Server.HTTPServer.Handler)
 }
 
@@ -391,6 +394,7 @@ func (t *App) initQueryFrontend() (services.Service, error) {
 
 	// http metrics endpoints
 	t.Server.HTTP.Handle(addHTTPAPIPrefix(&t.cfg, api.PathSpanMetricsSummary), spanMetricsSummaryHandler)
+	t.Server.HTTP.Handle(addHTTPAPIPrefix(&t.cfg, api.PathSpanMetricsMegaSelect), spanMetricsSummaryHandler)
 
 	// the query frontend needs to have knowledge of the blocks so it can shard search jobs
 	t.store.EnablePolling(nil)

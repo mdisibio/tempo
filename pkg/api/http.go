@@ -54,6 +54,7 @@ const (
 
 	// generator summary
 	urlParamGroupBy = "groupBy"
+	urlParamMetric  = "metric"
 
 	HeaderAccept         = "Accept"
 	HeaderContentType    = "Content-Type"
@@ -63,14 +64,15 @@ const (
 	PathPrefixQuerier   = "/querier"
 	PathPrefixGenerator = "/generator"
 
-	PathTraces             = "/api/traces/{traceID}"
-	PathSearch             = "/api/search"
-	PathSearchTags         = "/api/search/tags"
-	PathSearchTagValues    = "/api/search/tag/{" + muxVarTagName + "}/values"
-	PathEcho               = "/api/echo"
-	PathUsageStats         = "/status/usage-stats"
-	PathSpanMetrics        = "/api/metrics"
-	PathSpanMetricsSummary = "/api/metrics/summary"
+	PathTraces                = "/api/traces/{traceID}"
+	PathSearch                = "/api/search"
+	PathSearchTags            = "/api/search/tags"
+	PathSearchTagValues       = "/api/search/tag/{" + muxVarTagName + "}/values"
+	PathEcho                  = "/api/echo"
+	PathUsageStats            = "/status/usage-stats"
+	PathSpanMetrics           = "/api/metrics"
+	PathSpanMetricsSummary    = "/api/metrics/summary"
+	PathSpanMetricsMegaSelect = "/api/metrics/megaselect"
 
 	// PathOverrides user configurable overrides
 	PathOverrides = "/api/overrides"
@@ -417,6 +419,45 @@ func ParseSpanMetricsSummaryRequest(r *http.Request) (*tempopb.SpanMetricsSummar
 			return nil, fmt.Errorf("invalid end: %w", err)
 		}
 		req.End = uint32(end)
+	}
+
+	return req, nil
+}
+
+func ParseSpanMetricsMegaSelectRequest(r *http.Request) (*tempopb.SpanMetricsMegaSelectRequest, error) {
+	req := &tempopb.SpanMetricsMegaSelectRequest{}
+
+	query := r.URL.Query().Get(urlParamQuery)
+	req.Query = query
+
+	if s, ok := extractQueryParam(r, urlParamStart); ok {
+		start, err := strconv.ParseInt(s, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid start: %w", err)
+		}
+		req.Start = uint32(start)
+	}
+
+	if s, ok := extractQueryParam(r, urlParamEnd); ok {
+		end, err := strconv.ParseInt(s, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid end: %w", err)
+		}
+		req.End = uint32(end)
+	}
+
+	metric := r.URL.Query().Get(urlParamMetric)
+	switch {
+	case metric == "p99":
+		req.Metric = tempopb.SpanMetricsMegaSelectRequest_P99
+	case metric == "p90":
+		req.Metric = tempopb.SpanMetricsMegaSelectRequest_P90
+	case metric == "p50":
+		req.Metric = tempopb.SpanMetricsMegaSelectRequest_P50
+	case metric == "errorrate":
+		req.Metric = tempopb.SpanMetricsMegaSelectRequest_ERRORRATE
+	default:
+		return nil, fmt.Errorf("invalid metric: %s", metric)
 	}
 
 	return req, nil

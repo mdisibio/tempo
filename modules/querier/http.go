@@ -2,9 +2,11 @@ package querier
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/golang/protobuf/jsonpb" //nolint:all //deprecated
@@ -295,10 +297,92 @@ func (q *Querier) SpanMetricsSummaryHandler(w http.ResponseWriter, r *http.Reque
 	w.Header().Set(api.HeaderContentType, api.HeaderAcceptJSON)
 }
 
+func (q *Querier) SpanMetricsMegaSelectHandler(w http.ResponseWriter, r *http.Request) {
+	// Enforce the query timeout while querying backends
+	ctx, cancel := context.WithDeadline(r.Context(), time.Now().Add(q.cfg.Search.QueryTimeout))
+	defer cancel()
+
+	span, ctx := opentracing.StartSpanFromContext(ctx, "Querier.SpanMetricsMegaSelectHandler")
+	defer span.Finish()
+
+	req, err := api.ParseSpanMetricsMegaSelectRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	resp, err := q.SpanMetricsMegaSelect(ctx, req)
+	if err != nil {
+		handleError(w, err)
+		return
+	}
+
+	// translate to prom. doing this a dumb way. a custom marshaller on the proto objects
+	// would be cleaner and faster
+	promResp := PromResponse{
+		Status: resp.Status,
+		Data: PromData{
+			ResultType: resp.Data.ResultType,
+		},
+	}
+
+	for _, result := range resp.Data.Result {
+		promResult := PromResult{
+			Metric: map[string]string{},
+		}
+
+		// map labels
+		if result.LabelName == "" {
+			promResult.Metric["__name__"] = "mega-summary"
+		} else {
+			promResult.Metric["__name__"] = "not-mega-summary"
+			promResult.Metric[result.LabelName] = result.LabelValue
+		}
+
+		// map values
+		for _, ts := range result.Ts {
+			promResult.Values = append(promResult.Values, []interface{}{
+				float64(ts.Time),                         // float for timestamp. assume it's seconds
+				strconv.FormatFloat(ts.Val, 'f', -1, 64), // making assumptions about the float format returned from prom
+			})
+		}
+
+		promResp.Data.Result = append(promResp.Data.Result, promResult)
+	}
+
+	jsBytes, err := json.Marshal(promResp)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_, err = w.Write(jsBytes)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set(api.HeaderContentType, api.HeaderAcceptJSON)
+}
+
 func handleError(w http.ResponseWriter, err error) {
 	if errors.Is(err, context.Canceled) {
 		// ignore this error. we regularly cancel context once queries are complete
 		return
 	}
 	http.Error(w, err.Error(), http.StatusInternalServerError)
+}
+
+// objects to mock  the prometheus http response
+type PromResponse struct {
+	Status string   `json:"status"`
+	Data   PromData `json:"data"`
+}
+
+type PromData struct {
+	ResultType string       `json:"resultType"`
+	Result     []PromResult `json:"result"`
+}
+
+type PromResult struct {
+	Metric map[string]string `json:"metric"`
+	Values []interface{}     `json:"values"` // first entry is timestamp (float), second is value (string)
 }

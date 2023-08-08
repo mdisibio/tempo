@@ -16,6 +16,9 @@ const maxBuckets = 64
 
 type LatencyHistogram struct {
 	Buckets [maxBuckets]int // Exponential buckets, powers of 2
+
+	ExemplarDurationNano uint64
+	ExemplarTraceID      []byte
 }
 
 func New(buckets [maxBuckets]int) *LatencyHistogram {
@@ -35,6 +38,14 @@ func (m *LatencyHistogram) Record(durationNanos uint64) {
 	m.Buckets[bucket]++
 }
 
+func (m *LatencyHistogram) RecordExemplar(durationNanos uint64, traceID []byte) {
+	m.Record(durationNanos)
+
+	// just always overwrite. we don't need more than one per ts
+	m.ExemplarDurationNano = durationNanos
+	m.ExemplarTraceID = traceID
+}
+
 func (m *LatencyHistogram) Count() int {
 	total := 0
 	for _, count := range m.Buckets {
@@ -44,6 +55,12 @@ func (m *LatencyHistogram) Count() int {
 }
 
 func (m *LatencyHistogram) Combine(other LatencyHistogram) {
+	// only copy in if we have nothing? unsure what to do here
+	if len(m.ExemplarTraceID) == 0 {
+		m.ExemplarTraceID = other.ExemplarTraceID
+		m.ExemplarDurationNano = other.ExemplarDurationNano
+	}
+
 	for i := range m.Buckets {
 		m.Buckets[i] += other.Buckets[i]
 	}

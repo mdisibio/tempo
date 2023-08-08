@@ -29,7 +29,7 @@ func NewGrubbleTimeSeries(v Label) *GrubbleTimeSeries {
 	}
 }
 
-func (ts *GrubbleTimeSeries) Record(timestamp uint32, durationNanos uint64) {
+func (ts *GrubbleTimeSeries) Record(timestamp uint32, durationNanos uint64, traceID []byte) {
 	ts.TotalCount++
 
 	s := ts.Timestamps[timestamp]
@@ -37,7 +37,7 @@ func (ts *GrubbleTimeSeries) Record(timestamp uint32, durationNanos uint64) {
 		s = &LatencyHistogram{}
 		ts.Timestamps[timestamp] = s
 	}
-	s.Record(durationNanos)
+	s.RecordExemplar(durationNanos, traceID)
 }
 
 func (ts *GrubbleTimeSeries) Combine(other *GrubbleTimeSeries) {
@@ -68,6 +68,27 @@ func (ts *GrubbleTimeSeries) PercentileVector(p float64) ([]uint32, []uint64) {
 	return timestamps, percentiles
 }
 
+func (ts *GrubbleTimeSeries) PercentileVectorWithExemplar(p float64) ([]uint32, []uint64, [][]byte, []uint64) {
+	timestamps := make([]uint32, 0, len(ts.Timestamps))
+	for i := range ts.Timestamps {
+		timestamps = append(timestamps, i)
+	}
+	sort.Slice(timestamps, func(i, j int) bool {
+		return timestamps[i] < timestamps[j]
+	})
+
+	percentiles := make([]uint64, 0, len(ts.Timestamps))
+	traceIDs := make([][]byte, 0, len(ts.Timestamps))
+	durations := make([]uint64, 0, len(ts.Timestamps))
+	for _, i := range timestamps {
+		percentiles = append(percentiles, ts.Timestamps[i].Percentile(p))
+		traceIDs = append(traceIDs, ts.Timestamps[i].ExemplarTraceID)
+		durations = append(durations, ts.Timestamps[i].ExemplarDurationNano)
+	}
+
+	return timestamps, percentiles, traceIDs, durations
+}
+
 type GrubbleResults struct {
 	Series map[Label]*GrubbleTimeSeries
 }
@@ -78,14 +99,14 @@ func NewGrubbleResults() *GrubbleResults {
 	}
 }
 
-func (m *GrubbleResults) Record(v Label, timestamp uint32, durationNanos uint64) {
+func (m *GrubbleResults) Record(v Label, timestamp uint32, durationNanos uint64, traceID []byte) {
 	s := m.Series[v]
 	if s == nil {
 		s = NewGrubbleTimeSeries(v)
 		s.Label = v
 		m.Series[v] = s
 	}
-	s.Record(timestamp, durationNanos)
+	s.Record(timestamp, durationNanos, traceID)
 }
 
 func (m *GrubbleResults) Combine(other *GrubbleResults) {
@@ -172,7 +193,7 @@ func MegaSelect(ctx context.Context, query string, start, end uint64, fetcher tr
 	addConditionIfNotPresent(duration)
 	// addConditionIfNotPresent(name)
 	addConditionIfNotPresent(startTime)
-	req.SecondPassConditions = append(req.SecondPassConditions, traceql.Condition{MegaSelect: true})
+	req.SecondPassConditions = append(req.SecondPassConditions, traceql.Condition{Attribute: traceql.NewIntrinsic(traceql.IntrinsicTraceID)}, traceql.Condition{MegaSelect: true})
 
 	req.SecondPass = func(s *traceql.Spanset) ([]*traceql.Spanset, error) {
 		return eval([]*traceql.Spanset{s})
@@ -208,13 +229,13 @@ func MegaSelect(ctx context.Context, query string, start, end uint64, fetcher tr
 			dur := s.DurationNanos()
 
 			// All-span series
-			results.Record(Label{}, startTime, dur)
+			results.Record(Label{}, startTime, dur, ss.TraceID)
 
 			// Per-attribute series
 			for k, v := range s.Attributes() {
 				// fmt.Println("  ", k, v)
 				if k != duration {
-					results.Record(Label{k, v}, startTime, dur)
+					results.Record(Label{k, v}, startTime, dur, ss.TraceID)
 				}
 			}
 		}

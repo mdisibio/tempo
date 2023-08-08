@@ -13,6 +13,7 @@ import (
 	"github.com/golang/protobuf/proto"  //nolint:all //ProtoReflect
 	"github.com/grafana/tempo/pkg/api"
 	"github.com/grafana/tempo/pkg/tempopb"
+	"github.com/grafana/tempo/pkg/util"
 	"github.com/opentracing/opentracing-go"
 	ot_log "github.com/opentracing/opentracing-go/log"
 )
@@ -339,12 +340,23 @@ func (q *Querier) SpanMetricsMegaSelectHandler(w http.ResponseWriter, r *http.Re
 			promResult.Metric["__value__"] = result.LabelValue // "not-mega-summary"
 		}
 
+		promResult.Values = make([]interface{}, 0, len(result.Ts))
+		promResult.Exemplars = make([]interface{}, 0, len(result.Ts))
+
 		// map values
 		for _, ts := range result.Ts {
 			promResult.Values = append(promResult.Values, []interface{}{
 				float64(ts.Time),                         // float for timestamp. assume it's seconds
 				strconv.FormatFloat(ts.Val, 'f', -1, 64), // making assumptions about the float format returned from prom
 			})
+
+			if len(ts.ExemplarTraceID) > 0 {
+				promResult.Exemplars = append(promResult.Exemplars, []interface{}{
+					float64(ts.Time), // float for timestamp. assume it's seconds
+					strconv.FormatFloat(time.Duration(ts.ExemplarDuration).Seconds(), 'f', -1, 64),
+					util.TraceIDToHexString(ts.ExemplarTraceID),
+				})
+			}
 		}
 
 		promResp.Data.Result = append(promResp.Data.Result, promResult)
@@ -383,6 +395,7 @@ type PromData struct {
 }
 
 type PromResult struct {
-	Metric map[string]string `json:"metric"`
-	Values []interface{}     `json:"values"` // first entry is timestamp (float), second is value (string)
+	Metric    map[string]string `json:"metric"`
+	Values    []interface{}     `json:"values"`    // first entry is timestamp (float), second is value (string)
+	Exemplars []interface{}     `json:"exemplars"` // first entry is timestamp (float), second is duration (float seconds), third is traceID (string)
 }

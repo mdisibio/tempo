@@ -100,6 +100,10 @@ func (p *Processor) MegaSelect(ctx context.Context, req *tempopb.SpanMetricsMega
 			s.Timeseries = append(s.Timeseries, &tempopb.MegaSelectRawHistogram{
 				Time:             timestamp,
 				LatencyHistogram: h,
+				Exemplar: &tempopb.RawExemplar{
+					TraceID: histogram.ExemplarTraceID,
+					Val:     histogram.ExemplarDurationNano,
+				},
 			})
 		}
 

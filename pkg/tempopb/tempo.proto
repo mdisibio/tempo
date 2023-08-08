@@ -236,6 +236,11 @@ message RawHistogram {
   uint64 count = 2;
 }
 
+message RawExemplar {
+  bytes traceID = 1;  // traceID 
+  uint64 val = 2;     // duration ns
+}
+
 message KeyValue {
   string key = 1;
   TraceQLStatic value = 2;
@@ -306,11 +311,14 @@ message SpanMetricsMegaSelectResult {
 message SpanMetricsMegaSelectResultPoint {
   uint32 time = 1;
   double val = 2; 
+  bytes exemplarTraceID = 3;
+  uint64 exemplarDuration = 4;
 }
 
 message MegaSelectRawHistogram {
     uint32 time = 1;
     repeated RawHistogram latency_histogram = 2;
+    RawExemplar exemplar = 3;
 }
 
 message MegaSelectRawSeries {

@@ -739,48 +739,6 @@ func (q *Querier) SpanMetricsMegaSelect(ctx context.Context, req *tempopb.SpanMe
 		},
 	}
 
-	// add some fake series
-	/*resp.Data.Result = []*tempopb.SpanMetricsMegaSelectResult{
-		{
-			LabelName:  "", // this is the primary series
-			LabelValue: "",
-		},
-		// grouped in ui
-		{
-			LabelName:  "namespace",
-			LabelValue: "prod",
-		},
-		{
-			LabelName:  "namespace",
-			LabelValue: "dev",
-		},
-		// grouped in ui
-		{
-			LabelName:  "cluster",
-			LabelValue: "foo",
-		},
-		{
-			LabelName:  "cluster",
-			LabelValue: "bar",
-		},
-		{
-			LabelName:  "cluster",
-			LabelValue: "baz",
-		},
-	}
-
-	// create fake data for now
-	for _, r := range resp.Data.Result {
-		for ts := req.Start; ts < req.End; ts += 15 {
-			ts := &tempopb.SpanMetricsMegaSelectResultPoint{
-				Time: ts,
-				Val:  rand.Float64() * 100,
-			}
-
-			r.Ts = append(r.Ts, ts)
-		}
-	}*/
-
 	var percentile float64
 	switch req.Metric {
 	case tempopb.SpanMetricsMegaSelectRequest_P50:
@@ -797,12 +755,14 @@ func (q *Querier) SpanMetricsMegaSelect(ctx context.Context, req *tempopb.SpanMe
 		thisResult.LabelName = series.Label.Key.String()
 		thisResult.LabelValue = series.Label.Value.EncodeToString(false)
 
-		ts, percentiles := series.PercentileVector(percentile)
+		ts, percentiles, exemplarTraceIDs, exemplarDurations := series.PercentileVectorWithExemplar(percentile)
 
 		for i := range ts {
 			thisResult.Ts = append(thisResult.Ts, &tempopb.SpanMetricsMegaSelectResultPoint{
-				Time: ts[i],
-				Val:  time.Duration(int64(percentiles[i])).Seconds(),
+				Time:             ts[i],
+				Val:              time.Duration(int64(percentiles[i])).Seconds(),
+				ExemplarTraceID:  exemplarTraceIDs[i],
+				ExemplarDuration: exemplarDurations[i],
 			})
 		}
 
@@ -966,7 +926,7 @@ func protoToGrubbleRawSeries(proto *tempopb.MegaSelectRawSeries) *traceqlmetrics
 	out := traceqlmetrics.NewGrubbleTimeSeries(protoToLabel(proto.Label))
 
 	for _, ts := range proto.Timeseries {
-		out.Timestamps[ts.Time] = protoToHistogram(ts.LatencyHistogram)
+		out.Timestamps[ts.Time] = protoToHistogram(ts.LatencyHistogram, ts.Exemplar)
 	}
 
 	return out
@@ -983,8 +943,11 @@ func protoToLabel(proto *tempopb.KeyValue) traceqlmetrics.Label {
 	}
 }
 
-func protoToHistogram(proto []*tempopb.RawHistogram) *traceqlmetrics.LatencyHistogram {
-	out := &traceqlmetrics.LatencyHistogram{}
+func protoToHistogram(proto []*tempopb.RawHistogram, exemplar *tempopb.RawExemplar) *traceqlmetrics.LatencyHistogram {
+	out := &traceqlmetrics.LatencyHistogram{
+		ExemplarDurationNano: exemplar.Val,
+		ExemplarTraceID:      exemplar.TraceID,
+	}
 	for _, h := range proto {
 		out.Buckets[h.Bucket] += int(h.Count)
 	}

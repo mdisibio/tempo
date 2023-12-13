@@ -8,15 +8,12 @@ import (
 	"github.com/go-kit/log/level"
 	"github.com/grafana/dskit/ring"
 	"github.com/grafana/dskit/user"
-	"github.com/grafana/tempo/pkg/boundedwaitgroup"
 	"github.com/grafana/tempo/pkg/tempopb"
 	v1 "github.com/grafana/tempo/pkg/tempopb/common/v1"
 	"github.com/grafana/tempo/pkg/traceql"
 	"github.com/grafana/tempo/pkg/util/log"
-	"github.com/grafana/tempo/tempodb/backend"
 	"github.com/grafana/tempo/tempodb/encoding/common"
 	"github.com/opentracing/opentracing-go"
-	"github.com/uber-go/atomic"
 )
 
 func (q *Querier) QueryRange(ctx context.Context, req *tempopb.QueryRangeRequest) (*tempopb.QueryRangeResponse, error) {
@@ -79,35 +76,24 @@ func (q *Querier) queryBackend(ctx context.Context, req *tempopb.QueryRangeReque
 		}
 	}
 
-	wg := boundedwaitgroup.New(2)
-	jobErr := atomic.Error{}
-
 	for _, m := range withinTimeRange {
-		wg.Add(1)
-		go func(m *backend.BlockMeta) {
-			defer wg.Done()
+		span, ctx2 := opentracing.StartSpanFromContext(ctx, "querier.queryBackEnd.Block", opentracing.Tags{
+			"block":     m.BlockID.String(),
+			"blockSize": m.Size,
+		})
 
-			span, ctx2 := opentracing.StartSpanFromContext(ctx, "querier.queryBackEnd.Block", opentracing.Tags{
-				"block":     m.BlockID.String(),
-				"blockSize": m.Size,
-			})
-			defer span.Finish()
+		f := traceql.NewSpansetFetcherWrapper(func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansResponse, error) {
+			return q.store.Fetch(ctx, m, req, common.DefaultSearchOptions())
+		})
 
-			f := traceql.NewSpansetFetcherWrapper(func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansResponse, error) {
-				return q.store.Fetch(ctx, m, req, common.DefaultSearchOptions())
-			})
+		// TODO handle error
+		err := eval.Do(ctx2, f)
 
-			// TODO handle error
-			err := eval.Do(ctx2, f)
-			if err != nil {
-				jobErr.Store(err)
-			}
-		}(m)
-	}
+		span.Finish()
 
-	wg.Wait()
-	if err := jobErr.Load(); err != nil {
-		return nil, err
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	res, err := eval.Results()

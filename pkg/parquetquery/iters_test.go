@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/rand"
 	"os"
+	"strconv"
 	"testing"
 
 	"github.com/parquet-go/parquet-go"
@@ -341,4 +342,26 @@ func createFileWith[T any](t testing.TB, rows []T) *parquet.File {
 	require.NoError(t, err)
 
 	return pf
+}
+
+func BenchmarkEqualRowNumber(b *testing.B) {
+	aa := RowNumber{1, 2, 3, 4, 5, 6}
+	bb := RowNumber{1, 2, 3, 4, 5, 6}
+
+	for d := 0; d <= MaxDefinitionLevel; d++ {
+		b.Run(strconv.Itoa(d), func(b *testing.B) {
+			b.Run("EqualRowNumber", func(b *testing.B) {
+				ok := true
+				for i := 0; i < b.N; i++ {
+					ok = ok && EqualRowNumber(d, aa, bb)
+				}
+			})
+			b.Run("CompareRowNumber", func(b *testing.B) {
+				ok := true
+				for i := 0; i < b.N; i++ {
+					ok = ok && CompareRowNumbers(d, aa, bb) == 0
+				}
+			})
+		})
+	}
 }

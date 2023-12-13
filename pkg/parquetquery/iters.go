@@ -62,6 +62,17 @@ func CompareRowNumbers(upToDefinitionLevel int, a, b RowNumber) int {
 	return 0
 }
 
+// EqualRowNumber compares the sequences of row numbers in a and b
+// for partial equality. A little faster than CompareRowNumbers(d,a,b)==0
+func EqualRowNumber(upToDefinitionLevel int, a, b RowNumber) bool {
+	for i := 0; i <= upToDefinitionLevel; i++ {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TruncateRowNumber(definitionLevelToKeep int, t RowNumber) RowNumber {
 	n := EmptyRowNumber()
 	for i := 0; i <= definitionLevelToKeep; i++ {
@@ -1501,6 +1512,21 @@ func (j *LeftJoinIterator) peek(iterNum int) (*IteratorResult, error) {
 	return j.peeksRequired[iterNum], nil
 }
 
+func (j *LeftJoinIterator) collectRaw(rowNumber RowNumber, result *IteratorResult, iters []Iterator, peeks []*IteratorResult) (err error) {
+	for i := range iters {
+		// Collect matches
+		for peeks[i] != nil && EqualRowNumber(j.definitionLevel, peeks[i].RowNumber, rowNumber) {
+			result.Append(peeks[i])
+			ReleaseResult(peeks[i])
+			peeks[i], err = iters[i].Next()
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // Collect data from the given iterators until they point at
 // the next row (according to the configured definition level)
 // or are exhausted.
@@ -1509,31 +1535,17 @@ func (j *LeftJoinIterator) collect(rowNumber RowNumber) (*IteratorResult, error)
 	result := GetResult()
 	result.RowNumber = rowNumber
 
-	collect := func(iters []Iterator, peeks []*IteratorResult) {
-		for i := range iters {
-			// Collect matches
-			for peeks[i] != nil && CompareRowNumbers(j.definitionLevel, peeks[i].RowNumber, rowNumber) == 0 {
-				result.Append(peeks[i])
-				ReleaseResult(peeks[i])
-				peeks[i], err = iters[i].Next()
-				if err != nil {
-					return
-				}
-			}
-		}
-	}
-
 	err = j.seekAll(rowNumber, j.definitionLevel)
 	if err != nil {
 		return nil, err
 	}
 
-	collect(j.required, j.peeksRequired)
+	err = j.collectRaw(rowNumber, result, j.required, j.peeksRequired)
 	if err != nil {
 		return nil, err
 	}
 
-	collect(j.optional, j.peeksOptional)
+	err = j.collectRaw(rowNumber, result, j.optional, j.peeksOptional)
 	if err != nil {
 		return nil, err
 	}

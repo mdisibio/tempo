@@ -23,7 +23,8 @@ import (
 	"github.com/grafana/tempo/tempodb/encoding"
 	"github.com/grafana/tempo/tempodb/encoding/common"
 	"github.com/grafana/tempo/tempodb/wal"
-	"go.uber.org/atomic"
+	"github.com/opentracing/opentracing-go"
+	"github.com/uber-go/atomic"
 )
 
 const timeBuffer = 5 * time.Minute
@@ -105,11 +106,11 @@ func (p *Processor) PushSpans(_ context.Context, req *tempopb.PushSpansRequest) 
 	p.liveTracesMtx.Lock()
 	defer p.liveTracesMtx.Unlock()
 
-	//var count int
+	// var count int
 	before := p.liveTraces.Len()
 
 	for _, batch := range req.Batches {
-		//if batch, count = filterBatch(batch); batch != nil {
+		// if batch, count = filterBatch(batch); batch != nil {
 		err := p.liveTraces.Push(batch, p.Cfg.MaxLiveTraces)
 		if errors.Is(err, errMaxExceeded) {
 			metricDroppedTraces.WithLabelValues(p.tenant, reasonLiveTracesExceeded).Inc()
@@ -417,7 +418,7 @@ func (p *Processor) QueryRange(ctx context.Context, req *tempopb.QueryRangeReque
 		return nil, err
 	}
 
-	wg := boundedwaitgroup.New(5)
+	wg := boundedwaitgroup.New(10)
 	jobErr := atomic.Error{}
 
 	for _, b := range blocks {
@@ -430,15 +431,22 @@ func (p *Processor) QueryRange(ctx context.Context, req *tempopb.QueryRangeReque
 		}
 
 		wg.Add(1)
+
 		go func(b common.BackendBlock) {
 			defer wg.Done()
+
+			span, ctx2 := opentracing.StartSpanFromContext(ctx, "Processor.QueryRange.Block", opentracing.Tags{
+				"block":     b.BlockMeta().BlockID,
+				"blockSize": b.BlockMeta().Size,
+			})
+			defer span.Finish()
 
 			// TODO - caching
 			f := traceql.NewSpansetFetcherWrapper(func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansResponse, error) {
 				return b.Fetch(ctx, req, common.DefaultSearchOptions())
 			})
 
-			err = eval.Do(ctx, f)
+			err := eval.Do(ctx2, f)
 			if err != nil {
 				jobErr.Store(err)
 			}

@@ -14,6 +14,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/opentracing/opentracing-go"
 	"github.com/parquet-go/parquet-go"
 
 	"github.com/grafana/tempo/pkg/blockboundary"
@@ -2262,6 +2263,9 @@ func NewTraceIDShardingPredicate(shard, of int) parquetquery.Predicate {
 }
 
 func (b *backendBlock) rowGroupsForShard(ctx context.Context, pf *parquet.File, m backend.BlockMeta, shard, of int) ([]parquet.RowGroup, error) {
+	span, _ := opentracing.StartSpanFromContext(ctx, "parquet.rowGroupsForShard")
+	defer span.Finish()
+
 	indexBytes, err := b.r.Read(ctx, common.NameIndex, b.meta.BlockID, b.meta.TenantID, true)
 	if errors.Is(err, backend.ErrDoesNotExist) {
 		// No index, check all groups
@@ -2291,5 +2295,9 @@ func (b *backendBlock) rowGroupsForShard(ctx context.Context, pf *parquet.File, 
 			}
 		}
 	}
+
+	span.SetTag("totalRowGroups", len(rgs))
+	span.SetTag("matchedRowGroups", len(matches))
+
 	return matches, nil
 }

@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -89,6 +90,21 @@ func (s queryRangeSharder) RoundTrip(r *http.Request) (*http.Response, error) {
 		return s.respErrHandler(isProm, err)
 	}
 
+	// HACK HACK HACK
+	// Test out sampling rates with grouping by(.ff)
+	samplingRate := 1.0
+	re := regexp.MustCompile(`sample\.\d\d`)
+	match := re.FindString(queryRangeReq.Query)
+	if match != "" {
+		rateText := match[len("sample"):]
+		if f, err := strconv.ParseFloat(rateText, 64); err == nil {
+			samplingRate = f
+			r.URL.RawQuery = strings.ReplaceAll(r.URL.RawQuery, match, "")
+			r.RequestURI = strings.ReplaceAll(r.RequestURI, match, "")
+			queryRangeReq.Query = strings.ReplaceAll(queryRangeReq.Query, match, "")
+		}
+	}
+
 	_, err = traceql.Parse(queryRangeReq.Query)
 	if err != nil {
 		return s.respErrHandler(isProm, err)
@@ -114,7 +130,7 @@ func (s queryRangeSharder) RoundTrip(r *http.Request) (*http.Response, error) {
 		}, nil
 	}
 
-	generatorReq, err = s.generatorRequest(*queryRangeReq)
+	generatorReq, err = s.generatorRequest(*queryRangeReq, samplingRate)
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +143,7 @@ func (s queryRangeSharder) RoundTrip(r *http.Request) (*http.Response, error) {
 		reqCh <- generatorReq
 	}
 
-	err = s.backendRequests(tenantID, queryRangeReq, now, reqCh, stopCh)
+	err = s.backendRequests(tenantID, queryRangeReq, now, samplingRate, reqCh, stopCh)
 	if err != nil {
 		return nil, err
 	}
@@ -160,7 +176,7 @@ func (s queryRangeSharder) RoundTrip(r *http.Request) (*http.Response, error) {
 				}
 
 				_ = level.Error(s.logger).Log("msg", "error executing sharded query", "url", innerR.RequestURI, "err", err)
-				//progress.setError(err)
+				// progress.setError(err)
 				return
 			}
 
@@ -182,12 +198,23 @@ func (s queryRangeSharder) RoundTrip(r *http.Request) (*http.Response, error) {
 			err = (&jsonpb.Unmarshaler{AllowUnknownFields: true}).Unmarshal(resp.Body, results)
 			if err != nil {
 				_ = level.Error(s.logger).Log("msg", "error reading response body status == ok", "url", innerR.RequestURI, "err", err)
-				//progress.setError(err)
+				// progress.setError(err)
 				return
 			}
 
 			mtx.Lock()
 			defer mtx.Unlock()
+
+			// Multiply up the sampling rate
+			if job.samplingRate != 1.0 {
+				for _, series := range results.Series {
+					for i, sample := range series.Samples {
+						sample.Value *= 1.0 / job.samplingRate
+						series.Samples[i] = sample
+					}
+				}
+			}
+
 			c.Combine(results.Series)
 		}(job)
 	}
@@ -242,8 +269,7 @@ func (s *queryRangeSharder) blockMetas(start, end int64, tenantID string) []*bac
 	return metas
 }
 
-func (s *queryRangeSharder) backendRequests(tenantID string, searchReq *tempopb.QueryRangeRequest, now time.Time, reqCh chan *queryRangeJob, stopCh <-chan struct{}) error {
-
+func (s *queryRangeSharder) backendRequests(tenantID string, searchReq *tempopb.QueryRangeRequest, now time.Time, samplingRate float64, reqCh chan *queryRangeJob, stopCh <-chan struct{}) error {
 	// request without start or end, search only in generator
 	if searchReq.Start == 0 || searchReq.End == 0 {
 		close(reqCh)
@@ -265,13 +291,13 @@ func (s *queryRangeSharder) backendRequests(tenantID string, searchReq *tempopb.
 	}
 
 	go func() {
-		s.buildBackendRequests(tenantID, searchReq, start, end, reqCh, stopCh)
+		s.buildBackendRequests(tenantID, searchReq, start, end, samplingRate, reqCh, stopCh)
 	}()
 
 	return nil
 }
 
-func (s *queryRangeSharder) buildBackendRequests(tenantID string, searchReq *tempopb.QueryRangeRequest, start, end uint64, reqCh chan *queryRangeJob, stopCh <-chan struct{}) {
+func (s *queryRangeSharder) buildBackendRequests(tenantID string, searchReq *tempopb.QueryRangeRequest, start, end uint64, samplingRate float64, reqCh chan *queryRangeJob, stopCh <-chan struct{}) {
 	defer close(reqCh)
 
 	timeWindowSize := uint64(s.cfg.Interval.Nanoseconds())
@@ -304,8 +330,13 @@ func (s *queryRangeSharder) buildBackendRequests(tenantID string, searchReq *tem
 			shardR.Shard = uint32(i)
 			shardR.Of = uint32(shards)
 
+			if samplingRate != 1.0 {
+				shardR.Shard *= uint32(1.0 / samplingRate)
+				shardR.Of *= uint32(1.0 / samplingRate)
+			}
+
 			select {
-			case reqCh <- &queryRangeJob{req: shardR}:
+			case reqCh <- &queryRangeJob{req: shardR, samplingRate: samplingRate}:
 			case <-stopCh:
 				return
 			}
@@ -330,8 +361,7 @@ func (s *queryRangeSharder) backendRange(now time.Time, start, end uint64, query
 	return start, end
 }
 
-func (s *queryRangeSharder) generatorRequest(searchReq tempopb.QueryRangeRequest) (*queryRangeJob, error) {
-
+func (s *queryRangeSharder) generatorRequest(searchReq tempopb.QueryRangeRequest, samplingRate float64) (*queryRangeJob, error) {
 	now := time.Now()
 	cutoff := uint64(now.Add(-s.cfg.QueryBackendAfter).UnixNano())
 
@@ -349,11 +379,21 @@ func (s *queryRangeSharder) generatorRequest(searchReq tempopb.QueryRangeRequest
 		return nil, nil
 	}
 
-	// Shard 0 indicates generator request
-	searchReq.Shard = 0
-	searchReq.Of = 0
+	searchReq.QueryMode = "recent"
+
+	// No sharding on the generators (unecessary), but we populate these
+	// fields to make applying sampling rates consistent with backend jobs.
+	searchReq.Shard = 1
+	searchReq.Of = 1
+
+	if samplingRate != 1.0 {
+		searchReq.Shard *= uint32(1.0 / samplingRate)
+		searchReq.Of *= uint32(1.0 / samplingRate)
+	}
+
 	return &queryRangeJob{
-		req: searchReq,
+		req:          searchReq,
+		samplingRate: samplingRate,
 	}, nil
 }
 
@@ -377,7 +417,6 @@ func (s *queryRangeSharder) maxDuration(tenantID string) time.Duration {
 }
 
 func (s *queryRangeSharder) convertToPromFormat(resp *tempopb.QueryRangeResponse) PromResponse {
-
 	// Sort series alphabetically so they are stable in the UI
 	sort.Slice(resp.Series, func(i, j int) bool {
 		a := resp.Series[i].Labels
@@ -481,6 +520,7 @@ type PromResult struct {
 }
 
 type queryRangeJob struct {
-	req tempopb.QueryRangeRequest
-	err error
+	req          tempopb.QueryRangeRequest
+	samplingRate float64
+	err          error
 }

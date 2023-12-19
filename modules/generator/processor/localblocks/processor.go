@@ -16,6 +16,7 @@ import (
 	"github.com/grafana/tempo/pkg/boundedwaitgroup"
 	"github.com/grafana/tempo/pkg/model"
 	"github.com/grafana/tempo/pkg/tempopb"
+	commonv1proto "github.com/grafana/tempo/pkg/tempopb/common/v1"
 	"github.com/grafana/tempo/pkg/traceql"
 	"github.com/grafana/tempo/pkg/traceqlmetrics"
 	"github.com/grafana/tempo/pkg/util/log"
@@ -392,7 +393,7 @@ func (p *Processor) GetMetrics(ctx context.Context, req *tempopb.SpanMetricsRequ
 }
 
 // QueryRange returns metrics.
-func (p *Processor) QueryRange(ctx context.Context, req *tempopb.QueryRangeRequest) (traceql.SeriesSet, error) {
+func (p *Processor) QueryRange(ctx context.Context, req *tempopb.QueryRangeRequest) (*tempopb.QueryRangeResponse, error) {
 	p.blocksMtx.RLock()
 	defer p.blocksMtx.RUnlock()
 
@@ -418,8 +419,12 @@ func (p *Processor) QueryRange(ctx context.Context, req *tempopb.QueryRangeReque
 		return nil, err
 	}
 
-	wg := boundedwaitgroup.New(10)
-	jobErr := atomic.Error{}
+	var (
+		inspectedBytes  = atomic.Uint64{}
+		totalBlockBytes = uint64(0)
+		wg              = boundedwaitgroup.New(10)
+		jobErr          = atomic.Error{}
+	)
 
 	for _, b := range blocks {
 
@@ -431,6 +436,7 @@ func (p *Processor) QueryRange(ctx context.Context, req *tempopb.QueryRangeReque
 		}
 
 		wg.Add(1)
+		totalBlockBytes += b.BlockMeta().Size
 
 		go func(b common.BackendBlock) {
 			defer wg.Done()
@@ -441,9 +447,18 @@ func (p *Processor) QueryRange(ctx context.Context, req *tempopb.QueryRangeReque
 			})
 			defer span.Finish()
 
+			var resp traceql.FetchSpansResponse
+			defer func() {
+				if resp.Bytes != nil {
+					span.SetTag("inspectedBytes", resp.Bytes())
+					inspectedBytes.Add(resp.Bytes())
+				}
+			}()
+
 			// TODO - caching
 			f := traceql.NewSpansetFetcherWrapper(func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansResponse, error) {
-				return b.Fetch(ctx, req, common.DefaultSearchOptions())
+				resp, err = b.Fetch(ctx, req, common.DefaultSearchOptions())
+				return resp, err
 			})
 
 			err := eval.Do(ctx2, f)
@@ -459,7 +474,19 @@ func (p *Processor) QueryRange(ctx context.Context, req *tempopb.QueryRangeReque
 		return nil, err
 	}
 
-	return eval.Results()
+	res, err := eval.Results()
+	if err != nil {
+		return nil, err
+	}
+
+	return &tempopb.QueryRangeResponse{
+		Series: queryRangeTraceQLToProto(res, req),
+		Metrics: &tempopb.SearchMetrics{
+			TotalBlocks:     uint32(len(blocks)),
+			TotalBlockBytes: totalBlockBytes,
+			InspectedBytes:  inspectedBytes.Load(),
+		},
+	}, nil
 }
 
 func (p *Processor) metricsCacheGet(key string) *traceqlmetrics.MetricsResults {
@@ -752,4 +779,42 @@ func metricSeriesToProto(series traceqlmetrics.MetricSeries) []*tempopb.KeyValue
 		}
 	}
 	return r
+}
+
+func queryRangeTraceQLToProto(set traceql.SeriesSet, req *tempopb.QueryRangeRequest) []*tempopb.TimeSeries {
+	resp := make([]*tempopb.TimeSeries, 0, len(set))
+
+	for promLabels, s := range set {
+		labels := make([]commonv1proto.KeyValue, 0, len(s.Labels))
+		for _, label := range s.Labels {
+			labels = append(labels,
+				commonv1proto.KeyValue{
+					Key:   label.Name,
+					Value: traceql.NewStaticString(label.Value).AsAnyValue(),
+				},
+			)
+		}
+
+		intervals := traceql.IntervalCount(req.Start, req.End, req.Step)
+		samples := make([]tempopb.Sample, 0, intervals)
+		for i, value := range s.Values {
+
+			ts := traceql.TimestampOf(uint64(i), req.Start, req.Step)
+
+			samples = append(samples, tempopb.Sample{
+				TimestampMs: time.Unix(0, int64(ts)).UnixMilli(),
+				Value:       value,
+			})
+		}
+
+		ss := &tempopb.TimeSeries{
+			PromLabels: promLabels,
+			Labels:     labels,
+			Samples:    samples,
+		}
+
+		resp = append(resp, ss)
+	}
+
+	return resp
 }

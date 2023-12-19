@@ -62,6 +62,9 @@ func newQueryRangeSharder(reader tempodb.Reader, o overrides.Interface, cfg Quer
 }
 
 func (s queryRangeSharder) RoundTrip(r *http.Request) (*http.Response, error) {
+	span, ctx := opentracing.StartSpanFromContext(r.Context(), "frontend.QueryRangeSharder")
+	defer span.Finish()
+
 	now := time.Now()
 
 	var (
@@ -110,13 +113,11 @@ func (s queryRangeSharder) RoundTrip(r *http.Request) (*http.Response, error) {
 		return s.respErrHandler(isProm, err)
 	}
 
-	ctx := r.Context()
 	tenantID, err = user.ExtractOrgID(ctx)
 	if err != nil {
 		return s.respErrHandler(isProm, err)
 	}
-	span, ctx := opentracing.StartSpanFromContext(ctx, "frontend.QueryRangeSharder")
-	defer span.Finish()
+	span.SetTag("tenant", tenantID)
 
 	subCtx, subCancel := context.WithCancel(ctx)
 	defer subCancel()
@@ -143,7 +144,7 @@ func (s queryRangeSharder) RoundTrip(r *http.Request) (*http.Response, error) {
 		reqCh <- generatorReq
 	}
 
-	err = s.backendRequests(tenantID, queryRangeReq, now, samplingRate, reqCh, stopCh)
+	totalBlocks, totalBlockBytes, err := s.backendRequests(tenantID, queryRangeReq, now, samplingRate, reqCh, stopCh)
 	if err != nil {
 		return nil, err
 	}
@@ -215,18 +216,32 @@ func (s queryRangeSharder) RoundTrip(r *http.Request) (*http.Response, error) {
 				}
 			}
 
-			c.Combine(results.Series)
+			c.Combine(results)
 		}(job)
 	}
 
 	// wait for all goroutines running in wg to finish or cancelled
 	wg.Wait()
 
+	res := c.Response()
+	res.Metrics.CompletedJobs = uint32(startedReqs)
+	res.Metrics.TotalBlocks = uint32(totalBlocks)
+	res.Metrics.TotalBlockBytes = uint64(totalBlockBytes)
+
+	reqTime := time.Since(now)
+	throughput := float64(res.Metrics.InspectedBytes) / reqTime.Seconds()
+
+	span.SetTag("totalBlocks", res.Metrics.TotalBlocks)
+	span.SetTag("inspectedBytes", res.Metrics.InspectedBytes)
+	span.SetTag("inspectedTraces", res.Metrics.InspectedTraces)
+	span.SetTag("totalBlockBytes", res.Metrics.TotalBlockBytes)
+	span.SetTag("totalJobs", res.Metrics.TotalJobs)
+	span.SetTag("finishedJobs", res.Metrics.CompletedJobs)
+	span.SetTag("requestThroughput", throughput)
+
 	var bodyString string
 	if isProm {
-		promResp := s.convertToPromFormat(&tempopb.QueryRangeResponse{
-			Series: c.Results(),
-		})
+		promResp := s.convertToPromFormat(res)
 		bytes, err := json.Marshal(promResp)
 		if err != nil {
 			return nil, err
@@ -234,9 +249,7 @@ func (s queryRangeSharder) RoundTrip(r *http.Request) (*http.Response, error) {
 		bodyString = string(bytes)
 	} else {
 		m := &jsonpb.Marshaler{}
-		bodyString, err = m.MarshalToString(&tempopb.QueryRangeResponse{
-			Series: c.Results(),
-		})
+		bodyString, err = m.MarshalToString(res)
 		if err != nil {
 			return nil, err
 		}
@@ -269,11 +282,11 @@ func (s *queryRangeSharder) blockMetas(start, end int64, tenantID string) []*bac
 	return metas
 }
 
-func (s *queryRangeSharder) backendRequests(tenantID string, searchReq *tempopb.QueryRangeRequest, now time.Time, samplingRate float64, reqCh chan *queryRangeJob, stopCh <-chan struct{}) error {
+func (s *queryRangeSharder) backendRequests(tenantID string, searchReq *tempopb.QueryRangeRequest, now time.Time, samplingRate float64, reqCh chan *queryRangeJob, stopCh <-chan struct{}) (totalBlocks, totalBlockBytes int, err error) {
 	// request without start or end, search only in generator
 	if searchReq.Start == 0 || searchReq.End == 0 {
 		close(reqCh)
-		return nil
+		return
 	}
 
 	// calculate duration (start and end) to search the backend blocks
@@ -287,14 +300,28 @@ func (s *queryRangeSharder) backendRequests(tenantID string, searchReq *tempopb.
 	// no need to search backend
 	if start == end {
 		close(reqCh)
-		return nil
+		return
+	}
+
+	// Blocks within overall time range. This is just for instrumentation, more precise time
+	// range is checked for each window.
+	blocks := s.blockMetas(int64(start), int64(end), tenantID)
+	if len(blocks) == 0 {
+		// no need to search backend
+		close(reqCh)
+		return
+	}
+
+	totalBlocks = len(blocks)
+	for _, b := range blocks {
+		totalBlockBytes += int(b.Size)
 	}
 
 	go func() {
 		s.buildBackendRequests(tenantID, searchReq, start, end, samplingRate, reqCh, stopCh)
 	}()
 
-	return nil
+	return
 }
 
 func (s *queryRangeSharder) buildBackendRequests(tenantID string, searchReq *tempopb.QueryRangeRequest, start, end uint64, samplingRate float64, reqCh chan *queryRangeJob, stopCh <-chan struct{}) {

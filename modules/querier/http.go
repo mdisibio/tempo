@@ -367,6 +367,9 @@ func (q *Querier) QueryRangeHandler(w http.ResponseWriter, r *http.Request) {
 		errHandler(ctx, span, err)
 		return
 	}
+
+	span.SetTag("totalBlockBytes", resp.Metrics.TotalBlockBytes)
+	span.SetTag("inspectedBytes", resp.Metrics.InspectedBytes)
 }
 
 func handleError(w http.ResponseWriter, err error) {

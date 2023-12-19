@@ -49,14 +49,10 @@ func (q *Querier) queryRangeRecent(ctx context.Context, req *tempopb.QueryRangeR
 
 	c := traceql.QueryRangeCombiner{}
 	for _, result := range lookupResults {
-		c.Combine(result.response.(*tempopb.QueryRangeResponse).Series)
+		c.Combine(result.response.(*tempopb.QueryRangeResponse))
 	}
 
-	resp := &tempopb.QueryRangeResponse{
-		Series: c.Results(),
-	}
-
-	return resp, nil
+	return c.Response(), nil
 }
 
 func (q *Querier) queryBackend(ctx context.Context, req *tempopb.QueryRangeRequest) (*tempopb.QueryRangeResponse, error) {
@@ -79,12 +75,17 @@ func (q *Querier) queryBackend(ctx context.Context, req *tempopb.QueryRangeReque
 		}
 	}
 
-	wg := boundedwaitgroup.New(3)
-	jobErr := atomic.Error{}
+	var (
+		inspectedBytes  = atomic.Uint64{}
+		totalBlockBytes = uint64(0)
+		wg              = boundedwaitgroup.New(3)
+		jobErr          = atomic.Error{}
+	)
 
 	for _, m := range withinTimeRange {
 
 		wg.Add(1)
+		totalBlockBytes += m.Size
 
 		go func(m *backend.BlockMeta) {
 			defer wg.Done()
@@ -99,6 +100,7 @@ func (q *Querier) queryBackend(ctx context.Context, req *tempopb.QueryRangeReque
 			defer func() {
 				if resp.Bytes != nil {
 					span.SetTag("inspectedBytes", resp.Bytes())
+					inspectedBytes.Add(resp.Bytes())
 				}
 			}()
 
@@ -125,7 +127,14 @@ func (q *Querier) queryBackend(ctx context.Context, req *tempopb.QueryRangeReque
 		return nil, err
 	}
 
-	return &tempopb.QueryRangeResponse{Series: queryRangeTraceQLToProto(res, req)}, nil
+	return &tempopb.QueryRangeResponse{
+		Series: queryRangeTraceQLToProto(res, req),
+		Metrics: &tempopb.SearchMetrics{
+			TotalBlocks:     uint32(len(withinTimeRange)),
+			TotalBlockBytes: totalBlockBytes,
+			InspectedBytes:  inspectedBytes.Load(),
+		},
+	}, nil
 }
 
 func queryRangeTraceQLToProto(set traceql.SeriesSet, req *tempopb.QueryRangeRequest) []*tempopb.TimeSeries {

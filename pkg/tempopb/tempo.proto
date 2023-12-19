@@ -318,6 +318,7 @@ message QueryRangeRequest {
 
 message QueryRangeResponse {
   repeated TimeSeries series = 1;
+  SearchMetrics metrics = 2;
 }
 
 message Sample {

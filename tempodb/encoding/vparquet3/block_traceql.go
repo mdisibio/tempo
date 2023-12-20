@@ -18,6 +18,7 @@ import (
 	"github.com/parquet-go/parquet-go"
 
 	"github.com/grafana/tempo/pkg/blockboundary"
+	"github.com/grafana/tempo/pkg/cache"
 	"github.com/grafana/tempo/pkg/parquetquery"
 	v1 "github.com/grafana/tempo/pkg/tempopb/trace/v1"
 	"github.com/grafana/tempo/pkg/traceql"
@@ -2266,7 +2267,12 @@ func (b *backendBlock) rowGroupsForShard(ctx context.Context, pf *parquet.File, 
 	span, _ := opentracing.StartSpanFromContext(ctx, "parquet.rowGroupsForShard")
 	defer span.Finish()
 
-	indexBytes, err := b.r.Read(ctx, common.NameIndex, b.meta.BlockID, b.meta.TenantID, true)
+	cacheInfo := &backend.CacheInfo{
+		Meta: &m,
+		Role: cache.RoleTraceIDIdx,
+	}
+
+	indexBytes, err := b.r.Read(ctx, common.NameIndex, b.meta.BlockID, b.meta.TenantID, cacheInfo)
 	if errors.Is(err, backend.ErrDoesNotExist) {
 		// No index, check all groups
 		return pf.RowGroups(), nil

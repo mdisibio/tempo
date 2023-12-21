@@ -85,7 +85,7 @@ func New(cfg Config, next http.RoundTripper, o overrides.Interface, reader tempo
 		newMultiTenantMiddleware(cfg, combiner.NewSearchTagValuesV2, logger),
 		newSearchTagsMiddleware(), retryWare)
 
-	spanMetricsMiddleware := MergeMiddlewares(
+	metricsMiddleware := MergeMiddlewares(
 		newMultiTenantUnsupportedMiddleware(cfg, logger),
 		newMetricsMiddleware(), retryWare)
 
@@ -100,7 +100,7 @@ func New(cfg Config, next http.RoundTripper, o overrides.Interface, reader tempo
 	searchTagValues := searchTagsValuesMiddleware.Wrap(next)
 	searchTagValuesV2 := searchTagsValuesV2Middleware.Wrap(next)
 
-	metrics := spanMetricsMiddleware.Wrap(next)
+	metrics := metricsMiddleware.Wrap(next)
 	queryrange := queryRangeMiddleware.Wrap(next)
 
 	return &QueryFrontend{

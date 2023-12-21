@@ -726,7 +726,7 @@ func BenchmarkBackendBlockMetricsQueryRange(b *testing.B) {
 				Of:    0,
 			}
 
-			eval, err := e.CompileMetricsQueryRange(req)
+			eval, err := e.CompileMetricsQueryRange(req, false)
 			require.NoError(b, err)
 
 			var resp traceql.FetchSpansResponse
@@ -798,7 +798,7 @@ func TestCrap(b *testing.T) {
 
 	req := &tempopb.QueryRangeRequest{
 		Step: uint64(step),
-		//Query:    `{resource.service.name="tempo-gateway"} | count_over_time()`,
+		// Query:    `{resource.service.name="tempo-gateway"} | count_over_time()`,
 		Query: `{} | count_over_time()`,
 		Of:    1,
 	}
@@ -813,7 +813,7 @@ func TestCrap(b *testing.T) {
 			req.End = uint64(end.UnixNano())
 			req.Shard = i
 
-			eval, err := e.CompileMetricsQueryRange(req)
+			eval, err := e.CompileMetricsQueryRange(req, false)
 			require.NoError(b, err)
 
 			eval.Do(ctx, f)

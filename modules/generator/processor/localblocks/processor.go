@@ -448,6 +448,7 @@ func (p *Processor) QueryRange(ctx context.Context, req *tempopb.QueryRangeReque
 			defer span.Finish()
 
 			var resp traceql.FetchSpansResponse
+			var err error
 			defer func() {
 				if resp.Bytes != nil {
 					span.SetTag("inspectedBytes", resp.Bytes())
@@ -461,7 +462,7 @@ func (p *Processor) QueryRange(ctx context.Context, req *tempopb.QueryRangeReque
 				return resp, err
 			})
 
-			err := eval.Do(ctx2, f)
+			err = eval.Do(ctx2, f)
 			if err != nil {
 				jobErr.Store(err)
 			}

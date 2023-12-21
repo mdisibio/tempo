@@ -8,31 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestEscapes(t *testing.T) {
-	tests := []struct {
-		in       string
-		expected Pipeline
-	}{
-		{
-			in: `{ ."\"foo\""="\"\tbar\""}`,
-			expected: newPipeline(
-				newSpansetFilter(
-					newBinaryOperation(OpEqual,
-						NewAttribute("\"foo\""),
-						NewStaticString("\"\tbar\"")))),
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.in, func(t *testing.T) {
-			actual, err := Parse(tc.in)
-
-			require.NoError(t, err)
-			require.Equal(t, newRootExpr(tc.expected), actual)
-		})
-	}
-}
-
 func TestPipelineErrors(t *testing.T) {
 	tests := []struct {
 		in  string

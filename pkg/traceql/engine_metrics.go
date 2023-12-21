@@ -60,16 +60,13 @@ func IntervalOf(ts, start, end, step uint64) int {
 	return int((ts - start) / step)
 }
 
-const maxGroupBys = 5 // TODO - Delete me
-type FastValues [maxGroupBys]Static
-
 type TimeSeries struct {
-	// Labels LabelSet
 	Labels labels.Labels
 	Values []float64
 }
 
-// TODO - Make an analog of me in tempopb proto for over-the-wire transmission
+// SeriesSet is a set of unique timeseries. They are mapped by the "Prometheus"-style
+// text description: {x="a",y="b"}
 type SeriesSet map[string]TimeSeries
 
 // VectorAggregator turns a vector of spans into a single numeric scalar
@@ -162,6 +159,16 @@ func (s *StepAggregator) Samples() []float64 {
 	return ss
 }
 
+const maxGroupBys = 5 // TODO - This isn't ideal but see comment below.
+
+// FastValues is an array of attribute values (static values) that can be used
+// as a map key.  This offers good performance and works with native Go maps and
+// has no chance for collisions (whereas a hash32 has a non-zero chance of
+// collisions).  However it means we have to arbitrarily set an upper limit on
+// the maximum number of values.
+type FastValues [maxGroupBys]Static
+
+// GroupingAggregator groups spans into series based on attribute values.
 type GroupingAggregator struct {
 	// Config
 	by        []Attribute   // Original attributes: .foo
@@ -187,6 +194,7 @@ func NewGroupingAggregator(aggName string, innerAgg func() RangeAggregator, by [
 	for i, attr := range by {
 		if attr.Intrinsic == IntrinsicNone && attr.Scope == AttributeScopeNone {
 			// Unscoped attribute. Check span-level, then resource-level.
+			// TODO - Is this taken care of by span.AttributeFor now?
 			lookups[i] = []Attribute{
 				NewScopedAttribute(AttributeScopeSpan, false, attr.Name),
 				NewScopedAttribute(AttributeScopeResource, false, attr.Name),
@@ -204,8 +212,11 @@ func NewGroupingAggregator(aggName string, innerAgg func() RangeAggregator, by [
 	}
 }
 
+// Observe the span by looking up its group-by attributes, mapping to the series,
+// and passing to the inner aggregate.  This is a critical hot path.
 func (g *GroupingAggregator) Observe(span Span) {
 	// Get grouping values
+	// Reuse same buffer
 	for i, lookups := range g.byLookups {
 		g.buf[i] = lookup(lookups, span)
 	}
@@ -219,23 +230,46 @@ func (g *GroupingAggregator) Observe(span Span) {
 	agg.Observe(span)
 }
 
-// labelsFor gives the final labels for the series. Slower and can't be on the hot path.
-// This is tweaked to match what prometheus does.  For grouped metrics we don't
-// include the metric name, just the group labels.
-// rate() by (x) => {x=a}, {x=b}, ...
+// labelsFor gives the final labels for the series. Slower and not on the hot path.
+// This is tweaked to match what prometheus does where possible with an exception.
+// In the case of all values missing.
+// (1) Standard case: a label is created for each group-by value in the series:
+//
+//	Ex: rate() by (x,y) can yield:
+//	{x=a,y=b}
+//	{x=c,y=d}
+//	etc
+//
+// (2) Nils are dropped. A nil can be present for any label, so any combination
+// of the remaining labels is possible. Label order is preserved.
+//
+//	Ex: rate() by (x,y,z) can yield all of these combinations:
+//	{x=..., y=..., z=...}
+//	{x=...,        z=...}
+//	{x=...              }
+//	{       y=..., z=...}
+//	{       y=...       }
+//	etc
+//
+// (3) Exceptional case: All Nils. Real Prometheus-style metrics have a name, so there is
+// always at least 1 label. Not so here. We have to force at least 1 label or else things
+// may not be handled correctly downstream.  In this case we take the first label and
+// make it the string "nil"
+//
+//	Ex: rate() by (x,y,z) and all nil yields:
+//	{x="nil"}
 func (g *GroupingAggregator) labelsFor(vals FastValues) labels.Labels {
 	b := labels.NewBuilder(nil)
 
-	any := false
+	present := false
 	for i, v := range vals {
 		if v.Type != TypeNil {
 			b.Set(g.by[i].String(), v.EncodeToString(false))
-			any = true
+			present = true
 		}
 	}
 
-	if !any {
-		// Force at least 1 label or else this series is displayed weird
+	if !present {
 		b.Set(g.by[0].String(), "<nil>")
 	}
 
@@ -352,7 +386,7 @@ func (e *Engine) CompileMetricsQueryRange(req *tempopb.QueryRangeRequest, dedupe
 	// (1) Evalulate the query for any overlapping trace
 	// (2) For any matching spans: only include the ones that started in this time frame.
 	// This will increase redundant trace evalulation, but it ensures that matching spans are
-	// gauranteed to be found and included in the metrcs.
+	// guaranteed to be found and included in the metrcs.
 	startTime := NewIntrinsic(IntrinsicSpanStartTime)
 	if !storageReq.HasAttribute(startTime) {
 		if storageReq.AllConditions {
@@ -424,10 +458,9 @@ func lookup(needles []Attribute, haystack Span) Static {
 }
 
 type MetricsEvalulator struct {
-	start, end  uint64
-	checkTime   bool
-	dedupeSpans bool
-	// deduper         *SpanBloomDeduper
+	start, end      uint64
+	checkTime       bool
+	dedupeSpans     bool
 	deduper         *SpanDeduper2
 	storageReq      *FetchSpansRequest
 	metricsPipeline metricsFirstStageElement
@@ -447,7 +480,6 @@ func (e *MetricsEvalulator) Do(ctx context.Context, f SpansetFetcher) error {
 
 	if e.dedupeSpans && e.deduper == nil {
 		e.deduper = NewSpanDeduper2()
-		// e.deduper = NewSpanBloomDeduper()
 	}
 
 	defer fetch.Results.Close()
@@ -460,7 +492,9 @@ func (e *MetricsEvalulator) Do(ctx context.Context, f SpansetFetcher) error {
 		if ss == nil {
 			break
 		}
+
 		e.mtx.Lock()
+
 		for _, s := range ss.Spans {
 			if e.checkTime {
 				st := s.StartTimeUnixNanos()
@@ -476,6 +510,7 @@ func (e *MetricsEvalulator) Do(ctx context.Context, f SpansetFetcher) error {
 
 			e.count++
 			e.metricsPipeline.observe(s)
+
 		}
 		e.mtx.Unlock()
 		ss.Release()
@@ -484,85 +519,13 @@ func (e *MetricsEvalulator) Do(ctx context.Context, f SpansetFetcher) error {
 	return nil
 }
 
-func (e *MetricsEvalulator) SpanCount() (int, int) {
-	return e.count, e.deduped
+func (e *MetricsEvalulator) SpanCount() {
+	fmt.Println(e.count, e.deduped)
 }
 
 func (e *MetricsEvalulator) Results() (SeriesSet, error) {
 	return e.metricsPipeline.result(), nil
 }
-
-// SpanDeduper using sharded maps in-memory.  So far this is the most
-// performant.  We are effectively only using the bottom 5 bytes of
-// every span ID.  Byte [3] is used to select a sharded map and the
-// next 4 are the uint32 within that map. Is this good enough? Maybe... let's find out!
-/*type SpanDeduper struct {
-	m []map[uint32]struct{}
-}
-
-func NewSpanDeduper() *SpanDeduper {
-	maps := make([]map[uint32]struct{}, 256)
-	for i := range maps {
-		maps[i] = make(map[uint32]struct{}, 1000)
-	}
-	return &SpanDeduper{
-		m: maps,
-	}
-}
-
-func (d *SpanDeduper) Skip(id []byte) bool {
-	if len(id) != 8 {
-		return false
-	}
-
-	m := d.m[id[3]]
-	v := binary.BigEndian.Uint32(id[4:8])
-
-	if _, ok := m[v]; ok {
-		return true
-	}
-
-	m[v] = struct{}{}
-	return false
-}*/
-
-/*
-// This dedupes span IDs using a chain of bloom filters.  I thought it
-// was going to be awesome but it is WAY TOO SLOW
-type SpanBloomDeduper struct {
-	blooms []*bloom.BloomFilter
-	count  int
-}
-
-func NewSpanBloomDeduper() *SpanBloomDeduper {
-	//first := bloom.NewWithEstimates(1_000_000, 0.001)
-	first := bloom.New(999499917, 1)
-
-	return &SpanBloomDeduper{
-		blooms: []*bloom.BloomFilter{first},
-	}
-}
-
-func (d *SpanBloomDeduper) Skip(id []byte) bool {
-
-	for _, b := range d.blooms {
-		if b.Test(id) {
-			return true
-		}
-	}
-
-	d.count++
-	if d.count%1_000_000 == 0 {
-		// Time for another filter
-		//d.blooms = append(d.blooms, bloom.NewWithEstimates(1_000_000, 0.001))
-		d.blooms = append(d.blooms, bloom.New(999499917, 1))
-	}
-
-	// Set in latest filter
-	d.blooms[len(d.blooms)-1].Add(id)
-
-	return false
-}*/
 
 // SpanDeduper2 is EXTREMELY LAZY. It attempts to dedupe spans for metrics
 // without requiring any new data fields.  It uses trace ID and span start time
@@ -591,7 +554,7 @@ func NewSpanDeduper2() *SpanDeduper2 {
 
 func (d *SpanDeduper2) Skip(tid []byte, startTime uint64) bool {
 	d.h.Reset()
-	d.h.Write([]byte(tid))
+	d.h.Write(tid)
 	binary.BigEndian.PutUint64(d.buf, startTime)
 	d.h.Write(d.buf)
 

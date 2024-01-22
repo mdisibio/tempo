@@ -2201,8 +2201,12 @@ func NewTraceIDShardingPredicate(shardID, shardCount uint32) parquetquery.Predic
 // groups that contain trace IDs within the given shard.  Reading the trace ID index
 // is a single read and typically comes from cache.   Without this we have to test every
 // row group in the file which would be N reads.
-func (b *backendBlock) rowGroupsForShard(ctx context.Context, pf *parquet.File, m backend.BlockMeta, shardID, shardCount uint32) ([]parquet.RowGroup, error) {
+func (b *backendBlock) rowGroupsForShard(ctx context.Context, pf *parquet.File, m backend.BlockMeta, shardID, shardCount uint32) (matches []parquet.RowGroup, err error) {
 	span, _ := opentracing.StartSpanFromContext(ctx, "parquet.rowGroupsForShard")
+	defer func() {
+		span.SetTag("rowgroups_total", len(pf.RowGroups()))
+		span.SetTag("rowgroups_matched", len(matches))
+	}()
 	defer span.Finish()
 
 	cacheInfo := &backend.CacheInfo{
@@ -2213,7 +2217,8 @@ func (b *backendBlock) rowGroupsForShard(ctx context.Context, pf *parquet.File, 
 	indexBytes, err := b.r.Read(ctx, common.NameIndex, b.meta.BlockID, b.meta.TenantID, cacheInfo)
 	if errors.Is(err, backend.ErrDoesNotExist) {
 		// No index, check all groups
-		return pf.RowGroups(), nil
+		matches = pf.RowGroups()
+		return
 	}
 	if err != nil {
 		return nil, err
@@ -2227,7 +2232,6 @@ func (b *backendBlock) rowGroupsForShard(ctx context.Context, pf *parquet.File, 
 	_, testRange := traceidboundary.Funcs(shardID, shardCount)
 
 	rgs := pf.RowGroups()
-	matches := []parquet.RowGroup{}
 	for i := 0; i < len(index.RowGroups); i++ {
 		if i == 0 {
 			// The index contains the max trace ID for each row
@@ -2243,8 +2247,5 @@ func (b *backendBlock) rowGroupsForShard(ctx context.Context, pf *parquet.File, 
 		}
 	}
 
-	span.SetTag("totalRowGroups", len(rgs))
-	span.SetTag("matchedRowGroups", len(matches))
-
-	return matches, nil
+	return
 }

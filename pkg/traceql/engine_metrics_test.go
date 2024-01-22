@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/grafana/tempo/pkg/tempopb"
+	commonv1 "github.com/grafana/tempo/pkg/tempopb/common/v1"
+	"github.com/prometheus/prometheus/model/labels"
 	"github.com/stretchr/testify/require"
 )
 
@@ -238,4 +240,43 @@ func TestCompileMetricsQueryRangeFetchSpansRequest(t *testing.T) {
 			require.Equal(t, tc.expectedReq, *eval.storageReq)
 		})
 	}
+}
+
+func TestSeriesSetToProto(t *testing.T) {
+	req := tempopb.QueryRangeRequest{
+		Start: 0,
+		End:   uint64(3 * time.Minute), // 3 minute window
+		Step:  uint64(30 * time.Second),
+	}
+
+	ts := SeriesSet{
+		"": TimeSeries{
+			Labels: labels.FromStrings("a", "b"),
+			Values: []float64{6, 5, 4, 3, 2, 1, 0},
+		},
+	}.ToProto(req)
+
+	expected := []*tempopb.TimeSeries{
+		{
+			Labels: []commonv1.KeyValue{
+				{
+					Key: "a",
+					Value: &commonv1.AnyValue{
+						Value: &commonv1.AnyValue_StringValue{StringValue: "b"},
+					},
+				},
+			},
+			Samples: []tempopb.Sample{
+				{TimestampMs: 0, Value: 6},
+				{TimestampMs: 30000, Value: 5},
+				{TimestampMs: 60000, Value: 4},
+				{TimestampMs: 90000, Value: 3},
+				{TimestampMs: 120000, Value: 2},
+				{TimestampMs: 150000, Value: 1},
+				{TimestampMs: 180000, Value: 0},
+			},
+		},
+	}
+
+	require.Equal(t, expected, ts)
 }

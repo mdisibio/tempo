@@ -13,6 +13,7 @@ import (
 	"github.com/prometheus/prometheus/model/labels"
 
 	"github.com/grafana/tempo/pkg/tempopb"
+	commonv1 "github.com/grafana/tempo/pkg/tempopb/common/v1"
 	"github.com/grafana/tempo/pkg/util"
 )
 
@@ -68,6 +69,44 @@ type TimeSeries struct {
 // SeriesSet is a set of unique timeseries. They are mapped by the "Prometheus"-style
 // text description: {x="a",y="b"}
 type SeriesSet map[string]TimeSeries
+
+func (set SeriesSet) ToProto(req tempopb.QueryRangeRequest) []*tempopb.TimeSeries {
+	resp := make([]*tempopb.TimeSeries, 0, len(set))
+
+	for promLabels, s := range set {
+		labels := make([]commonv1.KeyValue, 0, len(s.Labels))
+		for _, label := range s.Labels {
+			labels = append(labels,
+				commonv1.KeyValue{
+					Key:   label.Name,
+					Value: NewStaticString(label.Value).AsAnyValue(),
+				},
+			)
+		}
+
+		intervals := IntervalCount(req.Start, req.End, req.Step)
+		samples := make([]tempopb.Sample, 0, intervals)
+		for i, value := range s.Values {
+
+			ts := TimestampOf(uint64(i), req.Start, req.Step)
+
+			samples = append(samples, tempopb.Sample{
+				TimestampMs: time.Unix(0, int64(ts)).UnixMilli(),
+				Value:       value,
+			})
+		}
+
+		ss := &tempopb.TimeSeries{
+			PromLabels: promLabels,
+			Labels:     labels,
+			Samples:    samples,
+		}
+
+		resp = append(resp, ss)
+	}
+
+	return resp
+}
 
 // VectorAggregator turns a vector of spans into a single numeric scalar
 type VectorAggregator interface {

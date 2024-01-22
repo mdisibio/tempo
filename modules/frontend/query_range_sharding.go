@@ -122,7 +122,7 @@ func (s queryRangeSharder) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 
 	targetBytes := s.cfg.TargetBytesPerRequest
-	if ok, v := expr.Hints.GetInt("targetBytes"); ok && v > 0 {
+	if ok, v := expr.Hints.GetInt("target_bytes_per_job"); ok && v > 0 {
 		targetBytes = v
 	}
 

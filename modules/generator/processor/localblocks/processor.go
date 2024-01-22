@@ -19,6 +19,7 @@ import (
 	"github.com/grafana/tempo/pkg/boundedwaitgroup"
 	"github.com/grafana/tempo/pkg/model"
 	"github.com/grafana/tempo/pkg/tempopb"
+	commonv1 "github.com/grafana/tempo/pkg/tempopb/common/v1"
 	v1 "github.com/grafana/tempo/pkg/tempopb/trace/v1"
 	"github.com/grafana/tempo/pkg/traceql"
 	"github.com/grafana/tempo/pkg/traceqlmetrics"
@@ -421,7 +422,7 @@ func (p *Processor) GetMetrics(ctx context.Context, req *tempopb.SpanMetricsRequ
 }
 
 // QueryRange returns metrics.
-func (p *Processor) QueryRange(ctx context.Context, req *tempopb.QueryRangeRequest) (traceql.SeriesSet, error) {
+func (p *Processor) QueryRange(ctx context.Context, req *tempopb.QueryRangeRequest) (resp *tempopb.QueryRangeResponse, err error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -496,7 +497,53 @@ func (p *Processor) QueryRange(ctx context.Context, req *tempopb.QueryRangeReque
 		return nil, err
 	}
 
-	return eval.Results()
+	res := eval.Results()
+	bytes, _, _ := eval.Metrics()
+
+	return &tempopb.QueryRangeResponse{
+		Series: queryRangeTraceQLToProto(res, req),
+		Metrics: &tempopb.SearchMetrics{
+			InspectedBytes: bytes,
+		},
+	}, nil
+}
+
+func queryRangeTraceQLToProto(set traceql.SeriesSet, req *tempopb.QueryRangeRequest) []*tempopb.TimeSeries {
+	resp := make([]*tempopb.TimeSeries, 0, len(set))
+
+	for promLabels, s := range set {
+		labels := make([]commonv1.KeyValue, 0, len(s.Labels))
+		for _, label := range s.Labels {
+			labels = append(labels,
+				commonv1.KeyValue{
+					Key:   label.Name,
+					Value: traceql.NewStaticString(label.Value).AsAnyValue(),
+				},
+			)
+		}
+
+		intervals := traceql.IntervalCount(req.Start, req.End, req.Step)
+		samples := make([]tempopb.Sample, 0, intervals)
+		for i, value := range s.Values {
+
+			ts := traceql.TimestampOf(uint64(i), req.Start, req.Step)
+
+			samples = append(samples, tempopb.Sample{
+				TimestampMs: time.Unix(0, int64(ts)).UnixMilli(),
+				Value:       value,
+			})
+		}
+
+		ss := &tempopb.TimeSeries{
+			PromLabels: promLabels,
+			Labels:     labels,
+			Samples:    samples,
+		}
+
+		resp = append(resp, ss)
+	}
+
+	return resp
 }
 
 func (p *Processor) metricsCacheGet(key string) *traceqlmetrics.MetricsResults {

@@ -56,6 +56,9 @@ func (q *Querier) queryRangeRecent(ctx context.Context, req *tempopb.QueryRangeR
 }
 
 func (q *Querier) queryBackend(ctx context.Context, req *tempopb.QueryRangeRequest) (*tempopb.QueryRangeResponse, error) {
+	span, ctx := opentracing.StartSpanFromContext(ctx, "querier.queryBackend")
+	defer span.Finish()
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -91,7 +94,7 @@ func (q *Querier) queryBackend(ctx context.Context, req *tempopb.QueryRangeReque
 		go func(m *backend.BlockMeta) {
 			defer wg.Done()
 
-			span, ctx := opentracing.StartSpanFromContext(ctx, "querier.queryBackEnd.Block", opentracing.Tags{
+			span, ctx := opentracing.StartSpanFromContext(ctx, "querier.queryBackend.block", opentracing.Tags{
 				"block":     m.BlockID.String(),
 				"blockSize": m.Size,
 			})
@@ -101,7 +104,6 @@ func (q *Querier) queryBackend(ctx context.Context, req *tempopb.QueryRangeReque
 				return q.store.Fetch(ctx, m, req, common.DefaultSearchOptions())
 			})
 
-			// TODO handle error
 			err := eval.Do(ctx, f)
 			if err != nil {
 				jobErr.Store(err)
@@ -114,12 +116,17 @@ func (q *Querier) queryBackend(ctx context.Context, req *tempopb.QueryRangeReque
 		return nil, err
 	}
 
-	res, err := eval.Results()
-	if err != nil {
-		return nil, err
-	}
+	res := eval.Results()
+	bytes, _, _ := eval.Metrics()
 
-	return &tempopb.QueryRangeResponse{Series: queryRangeTraceQLToProto(res, req)}, nil
+	span.SetTag("inspectedBytes", bytes)
+
+	return &tempopb.QueryRangeResponse{
+		Series: queryRangeTraceQLToProto(res, req),
+		Metrics: &tempopb.SearchMetrics{
+			InspectedBytes: bytes,
+		},
+	}, nil
 }
 
 func queryRangeTraceQLToProto(set traceql.SeriesSet, req *tempopb.QueryRangeRequest) []*tempopb.TimeSeries {

@@ -329,7 +329,7 @@ func (e *Engine) ExecuteMetricsQueryRange(ctx context.Context, req *tempopb.Quer
 		return nil, err
 	}
 
-	return eval.Results()
+	return eval.Results(), nil
 }
 
 // CompileMetricsQueryRange returns an evalulator that can be reused across multiple data sources.
@@ -464,8 +464,9 @@ type MetricsEvalulator struct {
 	deduper         *SpanDeduper2
 	storageReq      *FetchSpansRequest
 	metricsPipeline metricsFirstStageElement
-	count           int
-	deduped         int
+	spansTotal      uint64
+	spansDeduped    uint64
+	bytes           uint64
 	mtx             sync.Mutex
 }
 
@@ -504,11 +505,11 @@ func (e *MetricsEvalulator) Do(ctx context.Context, f SpansetFetcher) error {
 			}
 
 			if e.dedupeSpans && e.deduper.Skip(ss.TraceID, s.StartTimeUnixNanos()) {
-				e.deduped++
+				e.spansDeduped++
 				continue
 			}
 
-			e.count++
+			e.spansTotal++
 			e.metricsPipeline.observe(s)
 
 		}
@@ -516,15 +517,22 @@ func (e *MetricsEvalulator) Do(ctx context.Context, f SpansetFetcher) error {
 		ss.Release()
 	}
 
+	e.mtx.Lock()
+	defer e.mtx.Unlock()
+	e.bytes += fetch.Bytes()
+
 	return nil
 }
 
-func (e *MetricsEvalulator) SpanCount() {
-	fmt.Println(e.count, e.deduped)
+func (e *MetricsEvalulator) Results() SeriesSet {
+	return e.metricsPipeline.result()
 }
 
-func (e *MetricsEvalulator) Results() (SeriesSet, error) {
-	return e.metricsPipeline.result(), nil
+func (e *MetricsEvalulator) Metrics() (uint64, uint64, uint64) {
+	e.mtx.Lock()
+	defer e.mtx.Unlock()
+
+	return e.bytes, e.spansTotal, e.spansDeduped
 }
 
 // SpanDeduper2 is EXTREMELY LAZY. It attempts to dedupe spans for metrics

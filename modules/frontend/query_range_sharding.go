@@ -231,9 +231,7 @@ func (s queryRangeSharder) RoundTrip(r *http.Request) (*http.Response, error) {
 
 	span.SetTag("totalBlocks", res.Metrics.TotalBlocks)
 	span.SetTag("inspectedBytes", res.Metrics.InspectedBytes)
-	span.SetTag("inspectedTraces", res.Metrics.InspectedTraces)
 	span.SetTag("totalBlockBytes", res.Metrics.TotalBlockBytes)
-	span.SetTag("totalJobs", res.Metrics.TotalJobs)
 	span.SetTag("finishedJobs", res.Metrics.CompletedJobs)
 	span.SetTag("requestThroughput", throughput)
 

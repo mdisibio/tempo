@@ -456,6 +456,11 @@ func (q *Querier) QueryRangeHandler(w http.ResponseWriter, r *http.Request) {
 		errHandler(ctx, span, err)
 		return
 	}
+
+	if resp != nil && resp.Metrics != nil {
+		span.SetTag("inspectedBytes", resp.Metrics.InspectedBytes)
+		span.SetTag("inspectedSpans", resp.Metrics.InspectedTraces) // For metrics this is actuall span count
+	}
 }
 
 func handleError(w http.ResponseWriter, err error) {

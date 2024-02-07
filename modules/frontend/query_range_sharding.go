@@ -121,6 +121,16 @@ func (s queryRangeSharder) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 	}
 
+	targetBytesPerRequest := s.cfg.TargetBytesPerRequest
+	if ok, v := expr.Hints.GetInt("target_bytes_per_request"); ok && v > 0 {
+		targetBytesPerRequest = v
+	}
+
+	interval := s.cfg.Interval
+	if ok, v := expr.Hints.GetDuration("interval"); ok && v > 0 && v <= 24*time.Hour {
+		interval = v
+	}
+
 	generatorReq = s.generatorRequest(*queryRangeReq, samplingRate)
 
 	reqCh := make(chan *queryRangeJob, 1) // buffer of 1 allows us to insert ingestReq if it exists
@@ -131,7 +141,7 @@ func (s queryRangeSharder) RoundTrip(r *http.Request) (*http.Response, error) {
 		reqCh <- generatorReq
 	}
 
-	totalBlocks, totalBlockBytes := s.backendRequests(tenantID, queryRangeReq, now, samplingRate, reqCh, stopCh)
+	totalBlocks, totalBlockBytes := s.backendRequests(tenantID, queryRangeReq, now, samplingRate, targetBytesPerRequest, interval, reqCh, stopCh)
 
 	wg := boundedwaitgroup.New(uint(s.cfg.ConcurrentRequests))
 	jobErr := atomic.Error{}
@@ -274,7 +284,7 @@ func (s *queryRangeSharder) blockMetas(start, end int64, tenantID string) []*bac
 	return metas
 }
 
-func (s *queryRangeSharder) backendRequests(tenantID string, searchReq *tempopb.QueryRangeRequest, now time.Time, samplingRate float64, reqCh chan *queryRangeJob, stopCh <-chan struct{}) (totalBlocks, totalBlockBytes int) {
+func (s *queryRangeSharder) backendRequests(tenantID string, searchReq *tempopb.QueryRangeRequest, now time.Time, samplingRate float64, targetBytesPerRequest int, interval time.Duration, reqCh chan *queryRangeJob, stopCh <-chan struct{}) (totalBlocks, totalBlockBytes int) {
 	// request without start or end, search only in generator
 	if searchReq.Start == 0 || searchReq.End == 0 {
 		close(reqCh)
@@ -310,16 +320,19 @@ func (s *queryRangeSharder) backendRequests(tenantID string, searchReq *tempopb.
 	}
 
 	go func() {
-		s.buildBackendRequests(tenantID, searchReq, start, end, samplingRate, reqCh, stopCh)
+		s.buildBackendRequests(tenantID, searchReq, start, end, samplingRate, targetBytesPerRequest, interval, reqCh, stopCh)
 	}()
 
 	return
 }
 
-func (s *queryRangeSharder) buildBackendRequests(tenantID string, searchReq *tempopb.QueryRangeRequest, start, end uint64, samplingRate float64, reqCh chan *queryRangeJob, stopCh <-chan struct{}) {
+func (s *queryRangeSharder) buildBackendRequests(tenantID string, searchReq *tempopb.QueryRangeRequest, start, end uint64, samplingRate float64,
+	targetBytesPerRequest int, interval time.Duration,
+	reqCh chan *queryRangeJob, stopCh <-chan struct{},
+) {
 	defer close(reqCh)
 
-	timeWindowSize := uint64(s.cfg.Interval.Nanoseconds())
+	timeWindowSize := uint64(interval.Nanoseconds())
 
 	for start < end {
 
@@ -340,7 +353,7 @@ func (s *queryRangeSharder) buildBackendRequests(tenantID string, searchReq *tem
 			totalBlockSize += b.Size
 		}
 
-		shards := uint32(math.Ceil(float64(totalBlockSize) / float64(s.cfg.TargetBytesPerRequest)))
+		shards := uint32(math.Ceil(float64(totalBlockSize) / float64(targetBytesPerRequest)))
 
 		for i := uint32(1); i <= shards; i++ {
 			shardR := *searchReq

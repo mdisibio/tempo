@@ -347,7 +347,7 @@ func (e *Engine) CompileMetricsQueryRange(req *tempopb.QueryRangeRequest, dedupe
 		return nil, fmt.Errorf("step required")
 	}
 
-	eval, metricsPipeline, storageReq, err := e.Compile(req.Query)
+	expr, eval, metricsPipeline, storageReq, err := e.Compile(req.Query)
 	if err != nil {
 		return nil, fmt.Errorf("compiling query: %w", err)
 	}
@@ -356,13 +356,23 @@ func (e *Engine) CompileMetricsQueryRange(req *tempopb.QueryRangeRequest, dedupe
 		return nil, fmt.Errorf("not a metrics query")
 	}
 
+	timeOverlapCutoff := 0.2
+	if ok, v := expr.Hints.GetFloat("time_overlap_cutoff"); ok && v >= 0 && v <= 1.0 {
+		timeOverlapCutoff = v
+	}
+
+	if ok, v := expr.Hints.GetBool("dedupe"); ok {
+		dedupeSpans = v
+	}
+
 	// This initializes all step buffers, counters, etc
 	metricsPipeline.init(req)
 
 	me := &MetricsEvalulator{
-		storageReq:      storageReq,
-		metricsPipeline: metricsPipeline,
-		dedupeSpans:     dedupeSpans,
+		storageReq:        storageReq,
+		metricsPipeline:   metricsPipeline,
+		dedupeSpans:       dedupeSpans,
+		timeOverlapCutoff: timeOverlapCutoff,
 	}
 
 	// TraceID (not always required)
@@ -462,16 +472,17 @@ func lookup(needles []Attribute, haystack Span) Static {
 }
 
 type MetricsEvalulator struct {
-	start, end      uint64
-	checkTime       bool
-	dedupeSpans     bool
-	deduper         *SpanDeduper2
-	storageReq      *FetchSpansRequest
-	metricsPipeline metricsFirstStageElement
-	spansTotal      uint64
-	spansDeduped    uint64
-	bytes           uint64
-	mtx             sync.Mutex
+	start, end        uint64
+	checkTime         bool
+	timeOverlapCutoff float64
+	dedupeSpans       bool
+	deduper           *SpanDeduper2
+	storageReq        *FetchSpansRequest
+	metricsPipeline   metricsFirstStageElement
+	spansTotal        uint64
+	spansDeduped      uint64
+	bytes             uint64
+	mtx               sync.Mutex
 }
 
 func timeRangeOverlap(reqStart, reqEnd, dataStart, dataEnd uint64) float64 {
@@ -506,7 +517,7 @@ func (e *MetricsEvalulator) Do(ctx context.Context, f SpansetFetcher, fetcherSta
 		// and the request is less than 20%, use them.  Above 20%, the cost of loading
 		// them doesn't outweight the benefits. 20% was measured in local benchmarking.
 		// TODO - Make configurable or a query hint?
-		if overlap < 0.2 {
+		if overlap < e.timeOverlapCutoff {
 			storageReq.StartTimeUnixNanos = e.start
 			storageReq.EndTimeUnixNanos = e.end // Should this be exclusive?
 		}

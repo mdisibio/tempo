@@ -113,7 +113,9 @@ func (s queryRangeSharder) RoundTrip(r *http.Request) (*http.Response, error) {
 		}, nil
 	}
 
-	// Check sampling rate hint
+	//-------------------------------
+	// Sampling rate
+	//-------------------------------
 	samplingRate := 1.0
 	if ok, v := expr.Hints.GetFloat(traceql.HintSample); ok {
 		if v > 0 && v < 1.0 {
@@ -121,11 +123,31 @@ func (s queryRangeSharder) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 	}
 
+	//-------------------------------
+	// Job size
+	//-------------------------------
 	targetBytesPerRequest := s.cfg.TargetBytesPerRequest
+
+	// Automatically scale job size when sampling less than 100%
+	if samplingRate < 1.0 {
+		factor := 1.0 / samplingRate
+
+		// Keep it within reason
+		if factor > 10.0 {
+			factor = 10.0
+		}
+
+		targetBytesPerRequest = int(float64(targetBytesPerRequest) * factor)
+	}
+
+	// However a job size query hint can override.
 	if ok, v := expr.Hints.GetInt("target_bytes_per_request"); ok && v > 0 {
 		targetBytesPerRequest = v
 	}
 
+	//-------------------------------
+	// Interval
+	//-------------------------------
 	interval := s.cfg.Interval
 	if ok, v := expr.Hints.GetDuration("interval"); ok && v > 0 && v <= 24*time.Hour {
 		interval = v

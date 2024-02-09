@@ -77,6 +77,16 @@ func (q *Querier) queryBackend(ctx context.Context, req *tempopb.QueryRangeReque
 		return nil, nil
 	}
 
+	expr, err := traceql.Parse(req.Query)
+	if err != nil {
+		return nil, err
+	}
+
+	blockConcurrency := 2
+	if ok, v := expr.Hints.GetInt("block_concurrency"); ok && v > 0 && v <= 100 {
+		blockConcurrency = v
+	}
+
 	// Optimization
 	// If there's only 1 block then dedupe not needed.
 	dedupe := len(withinTimeRange) > 1
@@ -86,7 +96,7 @@ func (q *Querier) queryBackend(ctx context.Context, req *tempopb.QueryRangeReque
 		return nil, err
 	}
 
-	wg := boundedwaitgroup.New(2)
+	wg := boundedwaitgroup.New(uint(blockConcurrency))
 	jobErr := atomic.Error{}
 
 	for _, m := range withinTimeRange {

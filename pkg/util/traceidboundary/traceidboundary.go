@@ -3,8 +3,6 @@ package traceidboundary
 import (
 	"bytes"
 	"encoding/binary"
-	"os"
-	"strconv"
 
 	"github.com/grafana/tempo/pkg/blockboundary"
 )
@@ -28,17 +26,23 @@ type Boundary struct {
 //   - There are various regimes of 64-bit trace IDs and they are not uniformly distributed
 //     Therefore we sub-shard many bits further down than 64-bits.
 func Pairs(shard, of uint32) (boundaries []Boundary, upperInclusive bool) {
+	// Internal testing showed that sharding to 12 bits is 95+% optimal.
+	return PairsWithBitSharding(shard, of, 12)
+}
+
+// PairsWithBitSharding allows choosing a specific level of sub-sharding.
+func PairsWithBitSharding(shard, of uint32, bits int) (boundaries []Boundary, upperInclusive bool) {
 	// This function takes a list of trace ID boundaries and subdivides them down to the
 	// same space for the given number of bits.
 	// For example shard 2 of 4 has the boundary:
 	//		0x40	b0100
 	//		0x80	b1000
-	// Gives shard 2 of 4 in 64-bit-only space:
+	// Shifting by 1 bit gives shard 2 of 4 in 64-bit-only space:
 	//				 |
 	//				 v
 	//		0xA0	b1010
 	//		0xC0	b1100
-	// Gives shard 2 of 4 in 63-bit-only space:
+	// Shifting by 2 bits gives shard 2 of 4 in 63-bit-only space:
 	//				  |
 	// 				  v
 	//      0x50	b0101
@@ -56,21 +60,11 @@ func Pairs(shard, of uint32) (boundaries []Boundary, upperInclusive bool) {
 
 	original := blockboundary.CreateBlockBoundaries(int(of))
 
-	// Create all the sets of sharded IDs 64-bit and belows.
-	// We shard all the way down to this bit:
-	// Internal testing showed that sharding to 12 bits is 95+% optimal.
-	lowestShardedBit := 12
-
-	b := os.Getenv("shardingbit")
-	if v, err := strconv.Atoi(b); err == nil {
-		lowestShardedBit = v
-	}
-
-	for i := lowestShardedBit; i >= 1; i-- {
+	for i := bits; i >= 1; i-- {
 		min := cloneRotateAndSet(original[shard-1], i)
 		max := cloneRotateAndSet(original[shard], i)
 
-		if i == lowestShardedBit && shard == 1 {
+		if i == bits && shard == 1 {
 			// We don't shard below this, so its minimum is absolute zero.
 			clear(min)
 		}

@@ -44,16 +44,13 @@ func Pairs(shard, of uint32) (boundaries []Boundary, upperInclusive bool) {
 	//      0x50	b0101
 	//      0x60	b0110
 	// ... and so on
-	cloneRotateAndSet := func(v [][]byte, right int) [][]byte {
-		copy := make([][]byte, len(v))
-		for i := range v {
-			v2 := binary.BigEndian.Uint64(v[i])
-			v2 >>= right
-			v2 |= 0x01 << (64 - right)
+	cloneRotateAndSet := func(v []byte, right int) []byte {
+		v2 := binary.BigEndian.Uint64(v)
+		v2 >>= right
+		v2 |= 0x01 << (64 - right)
 
-			copy[i] = make([]byte, 8)
-			binary.BigEndian.PutUint64(copy[i], v2)
-		}
+		copy := make([]byte, 8)
+		binary.BigEndian.PutUint64(copy, v2)
 		return copy
 	}
 
@@ -70,14 +67,16 @@ func Pairs(shard, of uint32) (boundaries []Boundary, upperInclusive bool) {
 	}
 
 	for i := lowestShardedBit; i >= 1; i-- {
-		shiftedBounds := cloneRotateAndSet(original, i)
-		if i == lowestShardedBit {
+		min := cloneRotateAndSet(original[shard-1], i)
+		max := cloneRotateAndSet(original[shard], i)
+
+		if i == lowestShardedBit && shard == 1 {
 			// We don't shard below this, so its minimum is absolute zero.
-			clear(shiftedBounds[0])
+			clear(min)
 		}
 		boundaries = append(boundaries, Boundary{
-			Min: append([]byte{0, 0, 0, 0, 0, 0, 0, 0}, shiftedBounds[shard-1][0:8]...),
-			Max: append([]byte{0, 0, 0, 0, 0, 0, 0, 0}, shiftedBounds[shard][0:8]...),
+			Min: append([]byte{0, 0, 0, 0, 0, 0, 0, 0}, min[0:8]...),
+			Max: append([]byte{0, 0, 0, 0, 0, 0, 0, 0}, max[0:8]...),
 		})
 	}
 

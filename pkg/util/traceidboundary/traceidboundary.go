@@ -2,6 +2,9 @@ package traceidboundary
 
 import (
 	"bytes"
+	"encoding/binary"
+	"os"
+	"strconv"
 
 	"github.com/grafana/tempo/pkg/blockboundary"
 )
@@ -20,32 +23,72 @@ type Boundary struct {
 //   - Trace IDs can be 16 or 8 bytes.  If we naively sharded only in 16-byte space it would
 //     be unbalanced because all 8-byte IDs would land in the first shard. Therefore we
 //     divide in both 16- and 8-byte spaces and a single shard covers a range in each.
-//   - Technically 8-byte IDs are only 63 bits, so we account for this
 //   - The boundaries are inclusive/exclusive: [min, max), except the max of the last shard
 //     is the valid ID FFFFF... and inclusive/inclusive.
+//   - There are various regimes of 64-bit trace IDs and they are not uniformly distributed
+//     Therefore we sub-shard many bits further down than 64-bits.
 func Pairs(shard, of uint32) (boundaries []Boundary, upperInclusive bool) {
-	// First pair is 63-bit IDs left-padded with zeroes to make 16-byte divisions
-	// that matches the 16-byte layout in the block.
-	// To create 63-bit boundaries we create twice as many as needed,
-	// then only use the first half.  i.e. shaving off the top-most bit.
-	int63bounds := blockboundary.CreateBlockBoundaries(int(of * 2))
+	// This function takes a list of trace ID boundaries and subdivides them down to the
+	// same space for the given number of bits.
+	// For example shard 2 of 4 has the boundary:
+	//		0x40	b0100
+	//		0x80	b1000
+	// Gives shard 2 of 4 in 64-bit-only space:
+	//				 |
+	//				 v
+	//		0xA0	b1010
+	//		0xC0	b1100
+	// Gives shard 2 of 4 in 63-bit-only space:
+	//				  |
+	// 				  v
+	//      0x50	b0101
+	//      0x60	b0110
+	// ... and so on
+	cloneRotateAndSet := func(v [][]byte, right int) [][]byte {
+		copy := make([][]byte, len(v))
+		for i := range v {
+			v2 := binary.BigEndian.Uint64(v[i])
+			v2 >>= right
+			v2 |= 0x01 << (64 - right)
 
-	// Adjust last boundary to be inclusive so it matches the other pair.
-	int63bounds[of] = []byte{0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+			copy[i] = make([]byte, 8)
+			binary.BigEndian.PutUint64(copy[i], v2)
+		}
+		return copy
+	}
 
-	boundaries = append(boundaries, Boundary{
-		Min: append([]byte{0, 0, 0, 0, 0, 0, 0, 0}, int63bounds[shard-1][0:8]...),
-		Max: append([]byte{0, 0, 0, 0, 0, 0, 0, 0}, int63bounds[shard][0:8]...),
-	})
+	original := blockboundary.CreateBlockBoundaries(int(of))
 
-	// Second pair is normal full precision 16-byte IDs.
+	// Create all the sets of sharded IDs 64-bit and belows.
+	// We shard all the way down to this bit:
+	// Internal testing showed that sharding to 12 bits is 95+% optimal.
+	lowestShardedBit := 12
+
+	b := os.Getenv("shardingbit")
+	if v, err := strconv.Atoi(b); err == nil {
+		lowestShardedBit = v
+	}
+
+	for i := lowestShardedBit; i >= 1; i-- {
+		shiftedBounds := cloneRotateAndSet(original, i)
+		if i == lowestShardedBit {
+			// We don't shard below this, so its minimum is absolute zero.
+			clear(shiftedBounds[0])
+		}
+		boundaries = append(boundaries, Boundary{
+			Min: append([]byte{0, 0, 0, 0, 0, 0, 0, 0}, shiftedBounds[shard-1][0:8]...),
+			Max: append([]byte{0, 0, 0, 0, 0, 0, 0, 0}, shiftedBounds[shard][0:8]...),
+		})
+	}
+
+	// Final pair is normal full precision 16-byte IDs.
 	int128bounds := blockboundary.CreateBlockBoundaries(int(of))
 
 	// However there is one caveat - We adjust the very first boundary to ensure it doesn't
-	// overlap with the 63-bit precision ones. I.e. a minimum of 0x0000.... would
-	// unintentionally include all 63-bit IDs.
-	// The first 64-bit ID starts here:
-	int128bounds[0] = []byte{0, 0, 0, 0, 0, 0, 0, 0, 0x80, 0, 0, 0, 0, 0, 0, 0}
+	// overlap with the 64-bit precision ones. I.e. a minimum of 0x0000.... would
+	// unintentionally include all 64-bit IDs.
+	// The first 65-bit ID starts here:
+	int128bounds[0] = []byte{0, 0, 0, 0, 0, 0, 0, 0x01, 0, 0, 0, 0, 0, 0, 0, 0}
 
 	boundaries = append(boundaries, Boundary{
 		Min: int128bounds[shard-1],

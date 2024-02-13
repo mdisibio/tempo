@@ -96,7 +96,12 @@ func PairsWithBitSharding(shard, of uint32, bits int) (boundaries []Boundary, up
 
 // Funcs returns helper functions that match trace IDs in the given shard.
 func Funcs(shard, of uint32) (testSingle func([]byte) bool, testRange func([]byte, []byte) bool) {
-	pairs, upperInclusive := Pairs(shard, of)
+	return FuncsWithBitSharding(shard, of, 12)
+}
+
+// FuncsWithBitSharding allows choosing a specific level of sub-sharding.
+func FuncsWithBitSharding(shard, of uint32, bits int) (testSingle func([]byte) bool, testRange func([]byte, []byte) bool) {
+	pairs, upperInclusive := PairsWithBitSharding(shard, of, bits)
 
 	upper := -1
 	if upperInclusive {

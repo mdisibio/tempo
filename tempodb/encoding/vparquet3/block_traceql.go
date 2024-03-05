@@ -384,6 +384,7 @@ var spanPool = sync.Pool{
 }
 
 func putSpan(s *span) {
+	spanPuts++
 	s.id = nil
 	s.startTimeUnixNanos = 0
 	s.durationNanos = 0
@@ -400,7 +401,13 @@ func putSpan(s *span) {
 	spanPool.Put(s)
 }
 
+var (
+	spanPuts = 0
+	spanGets = 0
+)
+
 func getSpan() *span {
+	spanGets++
 	return spanPool.Get().(*span)
 }
 

@@ -1,12 +1,15 @@
 package traceql
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash"
 	"hash/fnv"
+	"math"
+	"sort"
 	"sync"
 	"time"
 
@@ -14,6 +17,7 @@ import (
 
 	"github.com/grafana/tempo/pkg/tempopb"
 	"github.com/grafana/tempo/pkg/util"
+	"github.com/grafana/tempo/pkg/util/loser"
 )
 
 func DefaultQueryRangeStep(start, end uint64) uint64 {
@@ -501,6 +505,13 @@ func timeRangeOverlap(reqStart, reqEnd, dataStart, dataEnd uint64) float64 {
 	return float64(end-st) / float64(dataEnd-dataStart)
 }
 
+func (e *MetricsEvalulator) ResetDedupeCache() {
+	// For testing
+	if e.dedupeSpans {
+		e.deduper = NewSpanDeduper2()
+	}
+}
+
 // Do metrics on the given source of data and merge the results into the working set.  Optionally, if provided,
 // uses the known time range of the data for last-minute optimizations. Time range is unix nanos
 func (e *MetricsEvalulator) Do(ctx context.Context, f SpansetFetcher, fetcherStart, fetcherEnd uint64) error {
@@ -561,6 +572,8 @@ func (e *MetricsEvalulator) Do(ctx context.Context, f SpansetFetcher, fetcherSta
 				}
 			}
 
+			// fmt.Printf("TraceID: %X, Span Start Time: %d\n", ss.TraceID, s.StartTimeUnixNanos())
+
 			if e.dedupeSpans && e.deduper.Skip(ss.TraceID, s.StartTimeUnixNanos()) {
 				e.spansDeduped++
 				continue
@@ -577,6 +590,179 @@ func (e *MetricsEvalulator) Do(ctx context.Context, f SpansetFetcher, fetcherSta
 	e.mtx.Lock()
 	defer e.mtx.Unlock()
 	e.bytes += fetch.Bytes()
+
+	return nil
+}
+
+type loserAdapter struct {
+	f   SpansetIterator
+	ctx context.Context
+	ss  *Spanset
+	i   int
+	err error
+	at  loserElement
+}
+
+func (l *loserAdapter) At() loserElement {
+	return l.at
+}
+
+func (l *loserAdapter) Next() bool {
+	if l.ss != nil {
+		l.i++
+		if l.i < len(l.ss.Spans) {
+			l.at.span = l.ss.Spans[l.i]
+			l.at.spanStartTime = l.at.span.StartTimeUnixNanos()
+			return true
+		}
+
+		// Exhausted this spanset
+		l.ss.Release()
+		l.ss = nil
+	}
+
+	// Get next spanset
+	ss, err := l.f.Next(l.ctx)
+	if err != nil {
+		l.err = err
+		return false
+	}
+
+	if ss == nil {
+		return false
+	}
+
+	sort.Slice(ss.Spans, func(i, j int) bool {
+		return ss.Spans[i].StartTimeUnixNanos() < ss.Spans[j].StartTimeUnixNanos()
+	})
+
+	l.ss = ss
+	l.i = 0
+	l.at.traceID = l.ss.TraceID
+	l.at.spanStartTime = l.ss.Spans[0].StartTimeUnixNanos()
+	l.at.span = l.ss.Spans[0]
+	return true
+}
+
+func (l *loserAdapter) Err() error {
+	return l.err
+}
+
+var _ loser.Sequence = (*loserAdapter)(nil)
+
+type loserElement struct {
+	traceID       []byte
+	spanStartTime uint64
+	span          Span
+}
+
+var loserElementMax = loserElement{
+	traceID:       []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},
+	spanStartTime: math.MaxUint64,
+}
+
+type FetcherWithTimeRange struct {
+	Fetcher        SpansetFetcher
+	StartUnixNanos uint64
+	EndUnixNanos   uint64
+}
+
+func (e *MetricsEvalulator) DoMulti(ctx context.Context, fetchers []FetcherWithTimeRange) error {
+	adapters := make([]*loserAdapter, 0, len(fetchers))
+	responses := make([]FetchSpansResponse, 0, len(fetchers))
+
+	for _, ftr := range fetchers {
+		// Make a copy of the request so we can modify it.
+		storageReq := *e.storageReq
+
+		if ftr.StartUnixNanos > 0 && ftr.EndUnixNanos > 0 {
+			// Dynamically decide whether to use the trace-level timestamp columns
+			// for filtering.
+			overlap := timeRangeOverlap(e.start, e.end, ftr.StartUnixNanos, ftr.EndUnixNanos)
+
+			if overlap == 0.0 {
+				// This shouldn't happen but might as well check.
+				// No overlap == nothing to do
+				return nil
+			}
+
+			// Our heuristic is if the overlap between the given fetcher (i.e. block)
+			// and the request is less than X%, use them.  Above X%, the cost of loading
+			// them doesn't outweight the benefits. The default 20% was measured in
+			// local benchmarking.
+			if overlap < e.timeOverlapCutoff {
+				storageReq.StartTimeUnixNanos = e.start
+				storageReq.EndTimeUnixNanos = e.end // Should this be exclusive?
+			}
+		}
+
+		r, err := ftr.Fetcher.Fetch(ctx, storageReq)
+		if err != nil {
+			return err
+		}
+
+		responses = append(responses, r)
+		adapters = append(adapters, &loserAdapter{
+			f:   r.Results,
+			ctx: ctx,
+		})
+	}
+
+	at := func(a *loserAdapter) loserElement {
+		return a.At()
+	}
+
+	less := func(a, b loserElement) bool {
+		switch bytes.Compare(a.traceID, b.traceID) {
+		case -1:
+			return true
+		case 1:
+			return false
+		}
+
+		return a.spanStartTime < b.spanStartTime
+	}
+
+	close := func(a *loserAdapter) {
+		a.f.Close()
+	}
+
+	tree := loser.New(adapters, loserElementMax, at, less, close)
+	defer tree.Close()
+
+	var previousTraceID []byte
+	var previousTs uint64
+
+	for tree.Next() {
+		value := tree.Winner().At()
+
+		if e.checkTime {
+			st := value.spanStartTime
+			if st < e.start || st >= e.end {
+				continue
+			}
+		}
+
+		if bytes.Equal(previousTraceID, value.traceID) && previousTs == value.spanStartTime {
+			// Dupe
+			continue
+		}
+
+		previousTraceID = value.traceID
+		previousTs = value.spanStartTime
+
+		// fmt.Printf("TraceID: %X, Span Start Time: %d\n", value.traceID, value.spanStartTime)
+
+		e.spansTotal++
+		e.metricsPipeline.observe(value.span)
+	}
+	if err := tree.Err(); err != nil {
+		return err
+	}
+
+	for _, r := range responses {
+		e.bytes += r.Bytes()
+	}
 
 	return nil
 }

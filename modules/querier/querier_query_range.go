@@ -16,7 +16,7 @@ import (
 	"github.com/grafana/tempo/tempodb/backend"
 	"github.com/grafana/tempo/tempodb/encoding/common"
 	"github.com/opentracing/opentracing-go"
-	"github.com/uber-go/atomic"
+	"go.uber.org/atomic"
 )
 
 func (q *Querier) QueryRange(ctx context.Context, req *tempopb.QueryRangeRequest) (*tempopb.QueryRangeResponse, error) {
@@ -98,45 +98,69 @@ func (q *Querier) queryBackend(ctx context.Context, req *tempopb.QueryRangeReque
 		concurrency = v
 	}
 
+	loser := false
+	if v, ok := expr.Hints.GetBool(traceql.HintLoser, unsafe); ok {
+		loser = v
+	}
+
 	eval, err := traceql.NewEngine().CompileMetricsQueryRange(req, dedupe, timeOverlapCutoff, unsafe)
 	if err != nil {
 		return nil, err
 	}
 
-	wg := boundedwaitgroup.New(uint(concurrency))
-	jobErr := atomic.Error{}
+	if loser {
+		fetchers := make([]traceql.FetcherWithTimeRange, 0, len(withinTimeRange))
+		for _, m := range withinTimeRange {
+			fetchers = append(fetchers, traceql.FetcherWithTimeRange{
+				Fetcher: traceql.NewSpansetFetcherWrapper(func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansResponse, error) {
+					return q.store.Fetch(ctx, m, req, common.DefaultSearchOptions())
+				}),
+				StartUnixNanos: uint64(m.StartTime.UnixNano()),
+				EndUnixNanos:   uint64(m.EndTime.UnixNano()),
+			})
+		}
 
-	for _, m := range withinTimeRange {
-		// If a job errored then quit immediately.
+		err = eval.DoMulti(ctx, fetchers)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+
+		wg := boundedwaitgroup.New(uint(concurrency))
+		jobErr := atomic.Error{}
+
+		for _, m := range withinTimeRange {
+			// If a job errored then quit immediately.
+			if err := jobErr.Load(); err != nil {
+				return nil, err
+			}
+
+			wg.Add(1)
+			go func(m *backend.BlockMeta) {
+				defer wg.Done()
+
+				span, ctx := opentracing.StartSpanFromContext(ctx, "querier.queryBackEnd.Block", opentracing.Tags{
+					"block":     m.BlockID.String(),
+					"blockSize": m.Size,
+				})
+				defer span.Finish()
+
+				f := traceql.NewSpansetFetcherWrapper(func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansResponse, error) {
+					return q.store.Fetch(ctx, m, req, common.DefaultSearchOptions())
+				})
+
+				// TODO handle error
+				err := eval.Do(ctx, f, uint64(m.StartTime.UnixNano()), uint64(m.EndTime.UnixNano()))
+				if err != nil {
+					jobErr.Store(err)
+				}
+			}(m)
+		}
+
+		wg.Wait()
 		if err := jobErr.Load(); err != nil {
 			return nil, err
 		}
-
-		wg.Add(1)
-		go func(m *backend.BlockMeta) {
-			defer wg.Done()
-
-			span, ctx := opentracing.StartSpanFromContext(ctx, "querier.queryBackEnd.Block", opentracing.Tags{
-				"block":     m.BlockID.String(),
-				"blockSize": m.Size,
-			})
-			defer span.Finish()
-
-			f := traceql.NewSpansetFetcherWrapper(func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansResponse, error) {
-				return q.store.Fetch(ctx, m, req, common.DefaultSearchOptions())
-			})
-
-			// TODO handle error
-			err := eval.Do(ctx, f, uint64(m.StartTime.UnixNano()), uint64(m.EndTime.UnixNano()))
-			if err != nil {
-				jobErr.Store(err)
-			}
-		}(m)
-	}
-
-	wg.Wait()
-	if err := jobErr.Load(); err != nil {
-		return nil, err
 	}
 
 	res, err := eval.Results()

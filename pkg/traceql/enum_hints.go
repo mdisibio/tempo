@@ -13,6 +13,7 @@ const (
 	HintJobSize           = "job_size"
 	HintTimeOverlapCutoff = "time_overlap_cutoff"
 	HintConcurrentBlocks  = "concurrent_blocks"
+	HintLoser             = "loser"
 )
 
 func isUnsafe(h string) bool {

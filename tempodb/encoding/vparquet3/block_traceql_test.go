@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -687,12 +688,13 @@ func BenchmarkBackendBlockGetMetrics(b *testing.B) {
 
 func BenchmarkBackendBlockQueryRange(b *testing.B) {
 	testCases := []string{
-		"{} | rate()",
-		"{} | rate() by (name)",
-		"{} | rate() by (resource.service.name)",
-		"{} | rate() by (span.http.url)", // High cardinality attribute
-		"{resource.service.name=`loki-ingester`} | rate()",
-		"{status=error} | rate()",
+		"{} | rate() with(loser=false)",
+		//"{} | rate() with(loser=true)",
+		//"{} | rate() by (name)",
+		//"{} | rate() by (resource.service.name)",
+		//"{} | rate() by (span.http.url)", // High cardinality attribute
+		//"{resource.service.name=`loki-ingester`} | rate()",
+		//"{status=error} | rate()",
 	}
 
 	var (
@@ -701,10 +703,10 @@ func BenchmarkBackendBlockQueryRange(b *testing.B) {
 		opts     = common.DefaultSearchOptions()
 		tenantID = "1"
 		// blockID  = uuid.MustParse("06ebd383-8d4e-4289-b0e9-cf2197d611d5")
-		blockID = uuid.MustParse("0008e57d-069d-4510-a001-b9433b2da08c")
-		// blockID = uuid.MustParse("18364616-f80d-45a6-b2a3-cb63e203edff")
-		// path = "/Users/marty/src/tmp/"
-		path = "/Users/mapno/workspace/testblock"
+		// blockID = uuid.MustParse("0008e57d-069d-4510-a001-b9433b2da08c")
+		blockID = uuid.MustParse("18364616-f80d-45a6-b2a3-cb63e203edff")
+		path    = "/Users/marty/src/tmp/"
+		// path = "/Users/mapno/workspace/testblock"
 	)
 
 	r, _, _, err := local.New(&local.Config{
@@ -727,38 +729,84 @@ func BenchmarkBackendBlockQueryRange(b *testing.B) {
 
 	for _, tc := range testCases {
 		b.Run(tc, func(b *testing.B) {
-			for _, minutes := range []int{1, 2, 3, 4, 5, 6, 7, 8, 9} {
+			for _, minutes := range []int{1 /*2, 3, 4, 5, 6, 7, 8, 9*/} {
 				b.Run(strconv.Itoa(minutes), func(b *testing.B) {
-					st := meta.StartTime
-					end := st.Add(time.Duration(minutes) * time.Minute)
+					for _, copies := range []int{10} {
+						b.Run(strconv.Itoa(copies), func(b *testing.B) {
+							st := meta.StartTime
+							end := st.Add(time.Duration(minutes) * time.Minute)
 
-					if end.After(meta.EndTime) {
-						b.SkipNow()
-						return
+							if end.After(meta.EndTime) {
+								b.SkipNow()
+								return
+							}
+
+							req := &tempopb.QueryRangeRequest{
+								Query:      tc,
+								Step:       uint64(time.Minute),
+								Start:      uint64(st.UnixNano()),
+								End:        uint64(end.UnixNano()),
+								ShardID:    30,
+								ShardCount: 65,
+							}
+
+							expr, err := traceql.Parse(tc)
+							require.NoError(b, err)
+
+							loser := false
+							if v, ok := expr.Hints.GetBool(traceql.HintLoser, true); ok {
+								loser = v
+							}
+
+							// Only dedupe when not using loser tree
+							eval, err := e.CompileMetricsQueryRange(req, loser == false, 0, true)
+							require.NoError(b, err)
+
+							b.ResetTimer()
+
+							for i := 0; i < b.N; i++ {
+								if loser {
+									// This processes X copies of the block
+									fetchers := make([]traceql.FetcherWithTimeRange, 0, copies)
+									for j := 0; j < copies; j++ {
+										fetchers = append(fetchers, traceql.FetcherWithTimeRange{
+											Fetcher:        f,
+											StartUnixNanos: uint64(block.meta.StartTime.UnixNano()),
+											EndUnixNanos:   uint64(block.meta.EndTime.UnixNano()),
+										})
+									}
+									err := eval.DoMulti(ctx, fetchers)
+									require.NoError(b, err)
+								} else {
+									// This processes X copies of the block
+									eval.ResetDedupeCache()
+									wg := sync.WaitGroup{}
+									for j := 0; j < copies; j++ {
+										wg.Add(1)
+										go func() {
+											defer wg.Done()
+											err := eval.Do(ctx, f, uint64(block.meta.StartTime.UnixNano()), uint64(block.meta.EndTime.UnixNano()))
+											require.NoError(b, err)
+										}()
+									}
+									wg.Wait()
+								}
+
+								//_, spansTotal, _ := eval.Metrics()
+								//fmt.Println("i:", i, "spansTotal", spansTotal)
+							}
+
+							fmt.Println("spanGets:", spanGets, "spanPuts:", spanPuts)
+
+							bytes, spansTotal, _ := eval.Metrics()
+							//if b.N > 1 && loser == false {
+							//	fmt.Println("b.N:", b.N, "SpansTotal:", spansTotal)
+							//}
+							b.ReportMetric(float64(bytes)/float64(b.N)/1024.0/1024.0, "MB_IO/op")
+							b.ReportMetric(float64(spansTotal)/float64(b.N), "spans/op")
+							b.ReportMetric(float64(spansTotal)/b.Elapsed().Seconds(), "spans/s")
+						})
 					}
-
-					req := &tempopb.QueryRangeRequest{
-						Query:      tc,
-						Step:       uint64(time.Minute),
-						Start:      uint64(st.UnixNano()),
-						End:        uint64(end.UnixNano()),
-						ShardID:    30,
-						ShardCount: 65,
-					}
-
-					eval, err := e.CompileMetricsQueryRange(req, false, 0, false)
-					require.NoError(b, err)
-
-					b.ResetTimer()
-					for i := 0; i < b.N; i++ {
-						err := eval.Do(ctx, f, uint64(block.meta.StartTime.UnixNano()), uint64(block.meta.EndTime.UnixNano()))
-						require.NoError(b, err)
-					}
-
-					bytes, spansTotal, _ := eval.Metrics()
-					b.ReportMetric(float64(bytes)/float64(b.N)/1024.0/1024.0, "MB_IO/op")
-					b.ReportMetric(float64(spansTotal)/float64(b.N), "spans/op")
-					b.ReportMetric(float64(spansTotal)/b.Elapsed().Seconds(), "spans/s")
 				})
 			}
 		})

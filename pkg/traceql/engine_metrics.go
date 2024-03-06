@@ -801,9 +801,11 @@ func (e *MetricsEvalulator) DoMulti(ctx context.Context, fetchers []FetcherWithT
 			}
 		}*/
 
-		if previousTs == span.StartTimeUnixNanos() && bytes.Equal(previousTraceID, traceID) {
-			// Dupe
-			continue
+		if e.dedupeSpans {
+			if previousTs == span.StartTimeUnixNanos() && bytes.Equal(previousTraceID, traceID) {
+				// Dupe
+				continue
+			}
 		}
 
 		previousTraceID = traceID

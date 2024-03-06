@@ -689,7 +689,7 @@ func BenchmarkBackendBlockGetMetrics(b *testing.B) {
 func BenchmarkBackendBlockQueryRange(b *testing.B) {
 	testCases := []string{
 		"{} | rate() with(loser=false)",
-		//"{} | rate() with(loser=true)",
+		"{} | rate() with(loser=true)",
 		//"{} | rate() by (name)",
 		//"{} | rate() by (resource.service.name)",
 		//"{} | rate() by (span.http.url)", // High cardinality attribute
@@ -729,9 +729,9 @@ func BenchmarkBackendBlockQueryRange(b *testing.B) {
 
 	for _, tc := range testCases {
 		b.Run(tc, func(b *testing.B) {
-			for _, minutes := range []int{1 /*2, 3, 4, 5, 6, 7, 8, 9*/} {
+			for _, minutes := range []int{7} {
 				b.Run(strconv.Itoa(minutes), func(b *testing.B) {
-					for _, copies := range []int{10} {
+					for _, copies := range []int{25} {
 						b.Run(strconv.Itoa(copies), func(b *testing.B) {
 							st := meta.StartTime
 							end := st.Add(time.Duration(minutes) * time.Minute)
@@ -777,6 +777,8 @@ func BenchmarkBackendBlockQueryRange(b *testing.B) {
 									}
 									err := eval.DoMulti(ctx, fetchers)
 									require.NoError(b, err)
+
+									fmt.Println("Loser spans filter by check time", traceql.LoserCheckTimeSpans.Load())
 								} else {
 									// This processes X copies of the block
 									eval.ResetDedupeCache()
@@ -796,7 +798,7 @@ func BenchmarkBackendBlockQueryRange(b *testing.B) {
 								//fmt.Println("i:", i, "spansTotal", spansTotal)
 							}
 
-							fmt.Println("spanGets:", spanGets, "spanPuts:", spanPuts)
+							// fmt.Println("spanGets:", spanGets.Load(), "spanPuts:", spanPuts.Load(), "ssGets:", spanSetGets.Load(), "ssPuts:", spanSetPuts.Load())
 
 							bytes, spansTotal, _ := eval.Metrics()
 							//if b.N > 1 && loser == false {

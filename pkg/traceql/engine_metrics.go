@@ -11,6 +11,7 @@ import (
 	"math"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/prometheus/model/labels"
@@ -490,6 +491,7 @@ type MetricsEvalulator struct {
 	metricsPipeline   metricsFirstStageElement
 	spansTotal        uint64
 	spansDeduped      uint64
+	spansetsTotal     uint64
 	bytes             uint64
 	mtx               sync.Mutex
 }
@@ -595,70 +597,127 @@ func (e *MetricsEvalulator) Do(ctx context.Context, f SpansetFetcher, fetcherSta
 }
 
 type loserAdapter struct {
-	f   SpansetIterator
-	ctx context.Context
-	ss  *Spanset
-	i   int
-	err error
-	at  loserElement
+	err        error
+	ss         *Spanset
+	i          int
+	checkTime  bool
+	start, end uint64
+
+	done        chan struct{}
+	spansetChan chan *Spanset
 }
 
-func (l *loserAdapter) At() loserElement {
-	return l.at
+func newLoserAdapter(ctx context.Context, iter SpansetIterator, checkTime bool, start, end uint64) *loserAdapter {
+	a := &loserAdapter{
+		done:        make(chan struct{}),
+		spansetChan: make(chan *Spanset, 0),
+		checkTime:   checkTime,
+		start:       start,
+		end:         end,
+	}
+
+	go func() {
+		defer iter.Close()
+		defer close(a.spansetChan)
+
+		for {
+			ss, err := iter.Next(ctx)
+			if err != nil {
+				a.err = err
+				break
+			}
+
+			if ss == nil {
+				break
+			}
+
+			if checkTime {
+				matches := false
+				for _, s := range ss.Spans {
+					st := s.StartTimeUnixNanos()
+					if st >= start && st < end {
+						matches = true
+						break
+					}
+				}
+				if !matches {
+					ss.Release()
+					continue
+				}
+			}
+
+			sort.Slice(ss.Spans, func(i, j int) bool {
+				return ss.Spans[i].StartTimeUnixNanos() < ss.Spans[j].StartTimeUnixNanos()
+			})
+
+			select {
+			case a.spansetChan <- ss:
+			case <-ctx.Done():
+				return
+			case <-a.done:
+				return
+			}
+		}
+	}()
+
+	return a
 }
+
+var LoserCheckTimeSpans atomic.Int64
 
 func (l *loserAdapter) Next() bool {
-	if l.ss != nil {
-		l.i++
-		if l.i < len(l.ss.Spans) {
-			l.at.span = l.ss.Spans[l.i]
-			l.at.spanStartTime = l.at.span.StartTimeUnixNanos()
-			return true
+	for {
+		if l.ss == nil {
+			ss, ok := <-l.spansetChan
+			if !ok {
+				return false
+			}
+			// New spanset
+			l.i = -1
+			l.ss = ss
 		}
 
-		// Exhausted this spanset
+		// Find first matching span
+		for l.i++; l.i < len(l.ss.Spans); l.i++ {
+			if !l.checkTime {
+				return true
+			}
+
+			st := l.ss.Spans[l.i].StartTimeUnixNanos()
+			if st >= l.start && st < l.end {
+				return true
+			}
+
+			LoserCheckTimeSpans.Add(1)
+		}
+
+		// Exhausted this spanset, release and continue.
 		l.ss.Release()
 		l.ss = nil
 	}
-
-	// Get next spanset
-	ss, err := l.f.Next(l.ctx)
-	if err != nil {
-		l.err = err
-		return false
-	}
-
-	if ss == nil {
-		return false
-	}
-
-	sort.Slice(ss.Spans, func(i, j int) bool {
-		return ss.Spans[i].StartTimeUnixNanos() < ss.Spans[j].StartTimeUnixNanos()
-	})
-
-	l.ss = ss
-	l.i = 0
-	l.at.traceID = l.ss.TraceID
-	l.at.spanStartTime = l.ss.Spans[0].StartTimeUnixNanos()
-	l.at.span = l.ss.Spans[0]
-	return true
 }
 
 func (l *loserAdapter) Err() error {
 	return l.err
 }
 
+func (a *loserAdapter) At() loserElement {
+	return loserElement{
+		tid: a.ss.TraceID,
+		ts:  a.ss.Spans[a.i].StartTimeUnixNanos(),
+	}
+}
+
 var _ loser.Sequence = (*loserAdapter)(nil)
 
 type loserElement struct {
-	traceID       []byte
-	spanStartTime uint64
-	span          Span
+	tid []byte
+	ts  uint64
 }
 
 var loserElementMax = loserElement{
-	traceID:       []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},
-	spanStartTime: math.MaxUint64,
+	tid: []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},
+	ts:  math.MaxUint64,
 }
 
 type FetcherWithTimeRange struct {
@@ -702,10 +761,7 @@ func (e *MetricsEvalulator) DoMulti(ctx context.Context, fetchers []FetcherWithT
 		}
 
 		responses = append(responses, r)
-		adapters = append(adapters, &loserAdapter{
-			f:   r.Results,
-			ctx: ctx,
-		})
+		adapters = append(adapters, newLoserAdapter(ctx, r.Results, e.checkTime, e.start, e.end))
 	}
 
 	at := func(a *loserAdapter) loserElement {
@@ -713,18 +769,18 @@ func (e *MetricsEvalulator) DoMulti(ctx context.Context, fetchers []FetcherWithT
 	}
 
 	less := func(a, b loserElement) bool {
-		switch bytes.Compare(a.traceID, b.traceID) {
+		switch bytes.Compare(a.tid, b.tid) {
 		case -1:
 			return true
 		case 1:
 			return false
 		}
 
-		return a.spanStartTime < b.spanStartTime
+		return a.ts < b.ts
 	}
 
 	close := func(a *loserAdapter) {
-		a.f.Close()
+		close(a.done)
 	}
 
 	tree := loser.New(adapters, loserElementMax, at, less, close)
@@ -734,27 +790,29 @@ func (e *MetricsEvalulator) DoMulti(ctx context.Context, fetchers []FetcherWithT
 	var previousTs uint64
 
 	for tree.Next() {
-		value := tree.Winner().At()
+		next := tree.Winner()
+		traceID := next.ss.TraceID
+		span := next.ss.Spans[next.i]
 
-		if e.checkTime {
-			st := value.spanStartTime
+		/*if e.checkTime {
+			st := span.StartTimeUnixNanos()
 			if st < e.start || st >= e.end {
 				continue
 			}
-		}
+		}*/
 
-		if bytes.Equal(previousTraceID, value.traceID) && previousTs == value.spanStartTime {
+		if previousTs == span.StartTimeUnixNanos() && bytes.Equal(previousTraceID, traceID) {
 			// Dupe
 			continue
 		}
 
-		previousTraceID = value.traceID
-		previousTs = value.spanStartTime
+		previousTraceID = traceID
+		previousTs = span.StartTimeUnixNanos()
 
 		// fmt.Printf("TraceID: %X, Span Start Time: %d\n", value.traceID, value.spanStartTime)
 
 		e.spansTotal++
-		e.metricsPipeline.observe(value.span)
+		e.metricsPipeline.observe(span)
 	}
 	if err := tree.Err(); err != nil {
 		return err

@@ -354,17 +354,13 @@ func (e *Engine) CompileMetricsQueryRange(req *tempopb.QueryRangeRequest, dedupe
 		return nil, fmt.Errorf("step required")
 	}
 
-	expr, eval, metricsPipeline, storageReq, err := e.Compile(req.Query)
+	_, eval, metricsPipeline, storageReq, err := e.Compile(req.Query)
 	if err != nil {
 		return nil, fmt.Errorf("compiling query: %w", err)
 	}
 
 	if metricsPipeline == nil {
 		return nil, fmt.Errorf("not a metrics query")
-	}
-
-	if v, ok := expr.Hints.GetBool(HintDedupe, allowUnsafeQueryHints); ok {
-		dedupeSpans = v
 	}
 
 	// This initializes all step buffers, counters, etc
@@ -726,34 +722,38 @@ type FetcherWithTimeRange struct {
 	EndUnixNanos   uint64
 }
 
+func (e *MetricsEvalulator) modifyForFetcher(req FetchSpansRequest, start, end uint64) FetchSpansRequest {
+	if start > 0 && end > 0 {
+		// Dynamically decide whether to use the trace-level timestamp columns
+		// for filtering.
+		overlap := timeRangeOverlap(e.start, e.end, start, end)
+
+		if overlap == 0.0 {
+			// This shouldn't happen but might as well check.
+			// No overlap == nothing to do
+			return req
+		}
+
+		// Our heuristic is if the overlap between the given fetcher (i.e. block)
+		// and the request is less than X%, use them.  Above X%, the cost of loading
+		// them doesn't outweight the benefits. The default 20% was measured in
+		// local benchmarking.
+		if overlap < e.timeOverlapCutoff {
+			req.StartTimeUnixNanos = e.start
+			req.EndTimeUnixNanos = e.end // Should this be exclusive?
+		}
+	}
+
+	return req
+}
+
 func (e *MetricsEvalulator) DoMulti(ctx context.Context, fetchers []FetcherWithTimeRange) error {
 	adapters := make([]*loserAdapter, 0, len(fetchers))
 	responses := make([]FetchSpansResponse, 0, len(fetchers))
 
 	for _, ftr := range fetchers {
 		// Make a copy of the request so we can modify it.
-		storageReq := *e.storageReq
-
-		if ftr.StartUnixNanos > 0 && ftr.EndUnixNanos > 0 {
-			// Dynamically decide whether to use the trace-level timestamp columns
-			// for filtering.
-			overlap := timeRangeOverlap(e.start, e.end, ftr.StartUnixNanos, ftr.EndUnixNanos)
-
-			if overlap == 0.0 {
-				// This shouldn't happen but might as well check.
-				// No overlap == nothing to do
-				return nil
-			}
-
-			// Our heuristic is if the overlap between the given fetcher (i.e. block)
-			// and the request is less than X%, use them.  Above X%, the cost of loading
-			// them doesn't outweight the benefits. The default 20% was measured in
-			// local benchmarking.
-			if overlap < e.timeOverlapCutoff {
-				storageReq.StartTimeUnixNanos = e.start
-				storageReq.EndTimeUnixNanos = e.end // Should this be exclusive?
-			}
-		}
+		storageReq := e.modifyForFetcher(*e.storageReq, ftr.StartUnixNanos, ftr.EndUnixNanos)
 
 		r, err := ftr.Fetcher.Fetch(ctx, storageReq)
 		if err != nil {
@@ -804,14 +804,13 @@ func (e *MetricsEvalulator) DoMulti(ctx context.Context, fetchers []FetcherWithT
 		if e.dedupeSpans {
 			if previousTs == span.StartTimeUnixNanos() && bytes.Equal(previousTraceID, traceID) {
 				// Dupe
+				e.spansDeduped++
 				continue
 			}
 		}
 
 		previousTraceID = traceID
 		previousTs = span.StartTimeUnixNanos()
-
-		// fmt.Printf("TraceID: %X, Span Start Time: %d\n", value.traceID, value.spanStartTime)
 
 		e.spansTotal++
 		e.metricsPipeline.observe(span)

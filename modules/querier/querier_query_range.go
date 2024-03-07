@@ -79,10 +79,6 @@ func (q *Querier) queryBackend(ctx context.Context, req *tempopb.QueryRangeReque
 
 	unsafe := q.limits.UnsafeQueryHints(tenantID)
 
-	// Optimization
-	// If there's only 1 block then dedupe not needed.
-	dedupe := len(withinTimeRange) > 1
-
 	expr, err := traceql.Parse(req.Query)
 	if err != nil {
 		return nil, err
@@ -103,14 +99,24 @@ func (q *Querier) queryBackend(ctx context.Context, req *tempopb.QueryRangeReque
 		loser = v
 	}
 
+	// Optimization
+	// If there's only 1 block then dedupe not needed.
+	// But it can be overriden with the query hint.
+	dedupe := len(withinTimeRange) > 1
+	if v, ok := expr.Hints.GetBool(traceql.HintDedupe, unsafe); ok {
+		dedupe = v
+	}
+
 	eval, err := traceql.NewEngine().CompileMetricsQueryRange(req, dedupe, timeOverlapCutoff, unsafe)
 	if err != nil {
 		return nil, err
 	}
 
+	// Loser tree only needed if deduping multiple blocks.
 	if loser {
 		fetchers := make([]traceql.FetcherWithTimeRange, 0, len(withinTimeRange))
 		for _, m := range withinTimeRange {
+			m := m
 			fetchers = append(fetchers, traceql.FetcherWithTimeRange{
 				Fetcher: traceql.NewSpansetFetcherWrapper(func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansResponse, error) {
 					return q.store.Fetch(ctx, m, req, common.DefaultSearchOptions())
@@ -119,7 +125,6 @@ func (q *Querier) queryBackend(ctx context.Context, req *tempopb.QueryRangeReque
 				EndUnixNanos:   uint64(m.EndTime.UnixNano()),
 			})
 		}
-
 		err = eval.DoMulti(ctx, fetchers)
 		if err != nil {
 			return nil, err

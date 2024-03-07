@@ -11,7 +11,6 @@ import (
 	"math"
 	"sort"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/prometheus/model/labels"
@@ -487,7 +486,6 @@ type MetricsEvalulator struct {
 	metricsPipeline   metricsFirstStageElement
 	spansTotal        uint64
 	spansDeduped      uint64
-	spansetsTotal     uint64
 	bytes             uint64
 	mtx               sync.Mutex
 }
@@ -569,8 +567,6 @@ func (e *MetricsEvalulator) Do(ctx context.Context, f SpansetFetcher, fetcherSta
 					continue
 				}
 			}
-
-			// fmt.Printf("TraceID: %X, Span Start Time: %d\n", ss.TraceID, s.StartTimeUnixNanos())
 
 			if e.dedupeSpans && e.deduper.Skip(ss.TraceID, s.StartTimeUnixNanos()) {
 				e.spansDeduped++
@@ -659,8 +655,6 @@ func newLoserAdapter(ctx context.Context, iter SpansetIterator, checkTime bool, 
 	return a
 }
 
-var LoserCheckTimeSpans atomic.Int64
-
 func (l *loserAdapter) Next() bool {
 	for {
 		if l.ss == nil {
@@ -683,8 +677,6 @@ func (l *loserAdapter) Next() bool {
 			if st >= l.start && st < l.end {
 				return true
 			}
-
-			LoserCheckTimeSpans.Add(1)
 		}
 
 		// Exhausted this spanset, release and continue.

@@ -688,7 +688,7 @@ func BenchmarkBackendBlockGetMetrics(b *testing.B) {
 
 func BenchmarkBackendBlockQueryRange(b *testing.B) {
 	testCases := []string{
-		"{} | rate() with(loser=false)",
+		//"{} | rate() with(loser=false)",
 		"{} | rate() with(loser=true)",
 		//"{} | rate() by (name)",
 		//"{} | rate() by (resource.service.name)",
@@ -731,7 +731,7 @@ func BenchmarkBackendBlockQueryRange(b *testing.B) {
 		b.Run(tc, func(b *testing.B) {
 			for _, minutes := range []int{7} {
 				b.Run(strconv.Itoa(minutes), func(b *testing.B) {
-					for _, copies := range []int{25} {
+					for _, copies := range []int{10} {
 						b.Run(strconv.Itoa(copies), func(b *testing.B) {
 							st := meta.StartTime
 							end := st.Add(time.Duration(minutes) * time.Minute)
@@ -759,7 +759,7 @@ func BenchmarkBackendBlockQueryRange(b *testing.B) {
 							}
 
 							// Only dedupe when not using loser tree
-							eval, err := e.CompileMetricsQueryRange(req, loser == false, 0, true)
+							eval, err := e.CompileMetricsQueryRange(req, true, 0, true)
 							require.NoError(b, err)
 
 							b.ResetTimer()
@@ -777,8 +777,6 @@ func BenchmarkBackendBlockQueryRange(b *testing.B) {
 									}
 									err := eval.DoMulti(ctx, fetchers)
 									require.NoError(b, err)
-
-									fmt.Println("Loser spans filter by check time", traceql.LoserCheckTimeSpans.Load())
 								} else {
 									// This processes X copies of the block
 									eval.ResetDedupeCache()
@@ -793,17 +791,9 @@ func BenchmarkBackendBlockQueryRange(b *testing.B) {
 									}
 									wg.Wait()
 								}
-
-								//_, spansTotal, _ := eval.Metrics()
-								//fmt.Println("i:", i, "spansTotal", spansTotal)
 							}
 
-							// fmt.Println("spanGets:", spanGets.Load(), "spanPuts:", spanPuts.Load(), "ssGets:", spanSetGets.Load(), "ssPuts:", spanSetPuts.Load())
-
 							bytes, spansTotal, _ := eval.Metrics()
-							//if b.N > 1 && loser == false {
-							//	fmt.Println("b.N:", b.N, "SpansTotal:", spansTotal)
-							//}
 							b.ReportMetric(float64(bytes)/float64(b.N)/1024.0/1024.0, "MB_IO/op")
 							b.ReportMetric(float64(spansTotal)/float64(b.N), "spans/op")
 							b.ReportMetric(float64(spansTotal)/b.Elapsed().Seconds(), "spans/s")

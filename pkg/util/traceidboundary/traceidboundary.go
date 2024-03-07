@@ -29,9 +29,9 @@ func Pairs(shard, of uint32) (boundaries []Boundary, upperInclusive bool) {
 
 // PairsWithBitSharding allows choosing a specific level of sub-sharding.
 func PairsWithBitSharding(shard, of uint32, bits int) (boundaries []Boundary, upperInclusive bool) {
-	if bits > 0 {
+	/*if bits > 0 {
 		boundaries = append(boundaries, complicatedShardingFor8ByteIDs(shard, of, bits)...)
-	}
+	}*/
 
 	// Final pair is the normal full precision 16-byte IDs.
 	int128bounds := blockboundary.CreateBlockBoundaries(int(of))

@@ -384,7 +384,6 @@ var spanPool = sync.Pool{
 }
 
 func putSpan(s *span) {
-	// spanPuts.Add(1)
 	s.id = nil
 	s.startTimeUnixNanos = 0
 	s.durationNanos = 0
@@ -401,22 +400,13 @@ func putSpan(s *span) {
 	spanPool.Put(s)
 }
 
-var (
-// spanPuts    atomic.Int64
-// spanGets    atomic.Int64
-// spanSetPuts atomic.Int64
-// spanSetGets atomic.Int64
-)
-
 func getSpan() *span {
-	// spanGets.Add(1)
 	return spanPool.Get().(*span)
 }
 
 var spansetPool = sync.Pool{}
 
 func getSpanset() *traceql.Spanset {
-	// spanSetGets.Add(1)
 	ss := spansetPool.Get()
 	if ss == nil {
 		return &traceql.Spanset{
@@ -429,7 +419,6 @@ func getSpanset() *traceql.Spanset {
 
 // putSpanset back into the pool.  Does not repool the spans.
 func putSpanset(ss *traceql.Spanset) {
-	// spanSetPuts.Add(1)
 	ss.Attributes = ss.Attributes[:0]
 	ss.DurationNanos = 0
 	ss.RootServiceName = ""

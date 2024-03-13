@@ -9,13 +9,13 @@ import (
 	"os"
 	"path"
 	"strconv"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
+	"github.com/grafana/tempo/pkg/boundedwaitgroup"
 	"github.com/grafana/tempo/pkg/tempopb"
 	v1_common "github.com/grafana/tempo/pkg/tempopb/common/v1"
 	v1 "github.com/grafana/tempo/pkg/tempopb/trace/v1"
@@ -690,6 +690,7 @@ func BenchmarkBackendBlockQueryRange(b *testing.B) {
 	testCases := []string{
 		//"{} | rate() with(loser=false)",
 		"{} | rate() with(loser=true)",
+		"{} | rate() with(loser=true,a=true)",
 		//"{} | rate() by (name)",
 		//"{} | rate() by (resource.service.name)",
 		//"{} | rate() by (span.http.url)", // High cardinality attribute
@@ -729,12 +730,12 @@ func BenchmarkBackendBlockQueryRange(b *testing.B) {
 
 	for _, tc := range testCases {
 		b.Run(tc, func(b *testing.B) {
-			for _, minutes := range []int{7} {
-				b.Run(strconv.Itoa(minutes), func(b *testing.B) {
-					for _, copies := range []int{10} {
+			for _, minutes := range []float64{5} {
+				b.Run(strconv.FormatFloat(minutes, 'g', -1, 64), func(b *testing.B) {
+					for _, copies := range []int{16} {
 						b.Run(strconv.Itoa(copies), func(b *testing.B) {
 							st := meta.StartTime
-							end := st.Add(time.Duration(minutes) * time.Minute)
+							end := st.Add(time.Duration(minutes * float64(time.Minute)))
 
 							if end.After(meta.EndTime) {
 								b.SkipNow()
@@ -757,6 +758,10 @@ func BenchmarkBackendBlockQueryRange(b *testing.B) {
 							if v, ok := expr.Hints.GetBool(traceql.HintLoser, true); ok {
 								loser = v
 							}
+							async := false
+							if v, ok := expr.Hints.GetBool("a", true); ok {
+								async = v
+							}
 
 							// Only dedupe when not using loser tree
 							eval, err := e.CompileMetricsQueryRange(req, true, 0, true)
@@ -775,12 +780,12 @@ func BenchmarkBackendBlockQueryRange(b *testing.B) {
 											EndUnixNanos:   uint64(block.meta.EndTime.UnixNano()),
 										})
 									}
-									err := eval.DoMulti(ctx, fetchers)
+									err := eval.DoMulti(ctx, fetchers, async)
 									require.NoError(b, err)
 								} else {
 									// This processes X copies of the block
 									eval.ResetDedupeCache()
-									wg := sync.WaitGroup{}
+									wg := boundedwaitgroup.New(4)
 									for j := 0; j < copies; j++ {
 										wg.Add(1)
 										go func() {
@@ -792,6 +797,8 @@ func BenchmarkBackendBlockQueryRange(b *testing.B) {
 									wg.Wait()
 								}
 							}
+
+							// fmt.Println("ssGets:", ssGets.Load(), "ssPuts:", ssPuts.Load(), "sGets:", sGets.Load(), "sPuts:", sPuts.Load())
 
 							bytes, spansTotal, _ := eval.Metrics()
 							b.ReportMetric(float64(bytes)/float64(b.N)/1024.0/1024.0, "MB_IO/op")

@@ -8,12 +8,12 @@ import (
 	"fmt"
 	"hash"
 	"hash/fnv"
-	"math"
-	"sort"
 	"sync"
 	"time"
 
+	"github.com/opentracing/opentracing-go"
 	"github.com/prometheus/prometheus/model/labels"
+	"go.uber.org/atomic"
 
 	"github.com/grafana/tempo/pkg/tempopb"
 	"github.com/grafana/tempo/pkg/util"
@@ -573,6 +573,7 @@ func (e *MetricsEvalulator) Do(ctx context.Context, f SpansetFetcher, fetcherSta
 				continue
 			}
 
+			// fmt.Printf("TraceID:%X s: %v\n", ss.TraceID, s.StartTimeUnixNanos())
 			e.spansTotal++
 			e.metricsPipeline.observe(s)
 
@@ -588,59 +589,77 @@ func (e *MetricsEvalulator) Do(ctx context.Context, f SpansetFetcher, fetcherSta
 	return nil
 }
 
-type loserAdapter struct {
-	err        error
-	ss         *Spanset
-	i          int
-	checkTime  bool
-	start, end uint64
+type SpansetIteratorFilter struct {
+	iter SpansetIterator
+	f    func(*Spanset) bool
+}
 
+var _ SpansetIterator = (*SpansetIteratorFilter)(nil)
+
+func (f *SpansetIteratorFilter) Next(ctx context.Context) (*Spanset, error) {
+	for {
+		ss, err := f.iter.Next(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if ss == nil {
+			return nil, nil
+		}
+		if !f.f(ss) {
+			ss.Release()
+			continue
+		}
+		return ss, nil
+	}
+}
+
+func (f *SpansetIteratorFilter) Close() {
+	f.iter.Close()
+}
+
+func FilterIterator(iter SpansetIterator, f func(*Spanset) bool) *SpansetIteratorFilter {
+	return &SpansetIteratorFilter{
+		iter: iter,
+		f:    f,
+	}
+}
+
+type SpansetIteratorAsync struct {
+	err atomic.Error
+	// iter        SpansetIterator
 	done        chan struct{}
 	spansetChan chan *Spanset
 }
 
-func newLoserAdapter(ctx context.Context, iter SpansetIterator, checkTime bool, start, end uint64) *loserAdapter {
-	a := &loserAdapter{
+var _ SpansetIterator = (*SpansetIteratorAsync)(nil)
+
+func AsyncifyIterator(ctx context.Context, f func() (SpansetIterator, error)) *SpansetIteratorAsync {
+	a := &SpansetIteratorAsync{
+		// iter:        iter,
 		done:        make(chan struct{}),
-		spansetChan: make(chan *Spanset, 0),
-		checkTime:   checkTime,
-		start:       start,
-		end:         end,
+		spansetChan: make(chan *Spanset, 1),
 	}
 
 	go func() {
+		iter, err := f()
+		if err != nil {
+			a.err.Store(err)
+			return
+		}
+
 		defer iter.Close()
 		defer close(a.spansetChan)
 
 		for {
 			ss, err := iter.Next(ctx)
 			if err != nil {
-				a.err = err
+				a.err.Store(err)
 				break
 			}
 
 			if ss == nil {
 				break
 			}
-
-			if checkTime {
-				matches := false
-				for _, s := range ss.Spans {
-					st := s.StartTimeUnixNanos()
-					if st >= start && st < end {
-						matches = true
-						break
-					}
-				}
-				if !matches {
-					ss.Release()
-					continue
-				}
-			}
-
-			sort.Slice(ss.Spans, func(i, j int) bool {
-				return ss.Spans[i].StartTimeUnixNanos() < ss.Spans[j].StartTimeUnixNanos()
-			})
 
 			select {
 			case a.spansetChan <- ss:
@@ -655,57 +674,58 @@ func newLoserAdapter(ctx context.Context, iter SpansetIterator, checkTime bool, 
 	return a
 }
 
-func (l *loserAdapter) Next() bool {
-	for {
-		if l.ss == nil {
-			ss, ok := <-l.spansetChan
-			if !ok {
-				return false
-			}
-			// New spanset
-			l.i = -1
-			l.ss = ss
-		}
-
-		// Find first matching span
-		for l.i++; l.i < len(l.ss.Spans); l.i++ {
-			if !l.checkTime {
-				return true
-			}
-
-			st := l.ss.Spans[l.i].StartTimeUnixNanos()
-			if st >= l.start && st < l.end {
-				return true
-			}
-		}
-
-		// Exhausted this spanset, release and continue.
-		l.ss.Release()
-		l.ss = nil
+func (f *SpansetIteratorAsync) Next(_ context.Context) (*Spanset, error) {
+	err := f.err.Load()
+	if err != nil {
+		return nil, err
 	}
+
+	ss, ok := <-f.spansetChan
+	if !ok {
+		return nil, nil
+	}
+	return ss, nil
+}
+
+func (f *SpansetIteratorAsync) Close() {
+	close(f.done)
+}
+
+type loserAdapter struct {
+	ctx  context.Context
+	err  error
+	ss   *Spanset
+	iter SpansetIterator
+}
+
+func newLoserAdapter(ctx context.Context, iter SpansetIterator) *loserAdapter {
+	a := &loserAdapter{
+		iter: iter,
+	}
+
+	return a
+}
+
+func (l *loserAdapter) Next() bool {
+	l.ss, l.err = l.iter.Next(l.ctx)
+	if l.ss == nil || l.err != nil {
+		return false
+	}
+	return true
 }
 
 func (l *loserAdapter) Err() error {
 	return l.err
 }
 
-func (a *loserAdapter) At() loserElement {
-	return loserElement{
-		tid: a.ss.TraceID,
-		ts:  a.ss.Spans[a.i].StartTimeUnixNanos(),
-	}
+func (a *loserAdapter) At() *Spanset {
+	return a.ss
 }
 
 var _ loser.Sequence = (*loserAdapter)(nil)
 
-type loserElement struct {
-	tid []byte
-	ts  uint64
-}
-
-var loserElementMax = loserElement{
-	tid: []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},
-	ts:  math.MaxUint64,
+var loserElementMax = &Spanset{
+	TraceID: []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},
 }
 
 type FetcherWithTimeRange struct {
@@ -739,77 +759,184 @@ func (e *MetricsEvalulator) modifyForFetcher(req FetchSpansRequest, start, end u
 	return req
 }
 
-func (e *MetricsEvalulator) DoMulti(ctx context.Context, fetchers []FetcherWithTimeRange) error {
-	adapters := make([]*loserAdapter, 0, len(fetchers))
-	responses := make([]FetchSpansResponse, 0, len(fetchers))
+func (e *MetricsEvalulator) filter(ss *Spanset) bool {
+	if !e.checkTime {
+		return true
+	}
 
-	for _, ftr := range fetchers {
+	for _, s := range ss.Spans {
+		st := s.StartTimeUnixNanos()
+		if st >= e.start && st < e.end {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *MetricsEvalulator) DoMulti(ctx context.Context, fetchers []FetcherWithTimeRange, async bool) error {
+	span, ctx := opentracing.StartSpanFromContext(ctx, "engine.DoMulti")
+	defer span.Finish()
+
+	spansetsTotal := 0
+	spansetsDedupedMap := 0
+	spansetsDedupedFast := 0
+	spansetsNotDeduped := 0
+
+	adapters := make([]*loserAdapter, len(fetchers))
+	responses := make([]FetchSpansResponse, len(fetchers))
+
+	for i := range fetchers {
+		i := i
+
+		ftr := fetchers[i]
+
 		// Make a copy of the request so we can modify it.
 		storageReq := e.modifyForFetcher(*e.storageReq, ftr.StartUnixNanos, ftr.EndUnixNanos)
 
-		r, err := ftr.Fetcher.Fetch(ctx, storageReq)
-		if err != nil {
-			return err
-		}
+		if async {
+			// Move opening the block into the async iterator func
+			adapters[i] = newLoserAdapter(ctx, AsyncifyIterator(ctx, func() (SpansetIterator, error) {
+				r, err := ftr.Fetcher.Fetch(ctx, storageReq)
+				if err != nil {
+					return nil, err
+				}
 
-		responses = append(responses, r)
-		adapters = append(adapters, newLoserAdapter(ctx, r.Results, e.checkTime, e.start, e.end))
+				responses[i] = r
+				return FilterIterator(r.Results, e.filter), nil
+			}))
+		} else {
+			// Open the block right now
+			r, err := ftr.Fetcher.Fetch(ctx, storageReq)
+			if err != nil {
+				return err
+			}
+			responses[i] = r
+			adapters[i] = newLoserAdapter(ctx, r.Results)
+		}
 	}
 
-	at := func(a *loserAdapter) loserElement {
+	at := func(a *loserAdapter) *Spanset {
 		return a.At()
 	}
 
-	less := func(a, b loserElement) bool {
-		switch bytes.Compare(a.tid, b.tid) {
-		case -1:
-			return true
-		case 1:
-			return false
-		}
-
-		return a.ts < b.ts
+	less := func(a, b *Spanset) bool {
+		return bytes.Compare(a.TraceID, b.TraceID) == -1
 	}
 
 	close := func(a *loserAdapter) {
-		close(a.done)
+		a.iter.Close()
 	}
 
 	tree := loser.New(adapters, loserElementMax, at, less, close)
 	defer tree.Close()
 
-	var previousTraceID []byte
-	var previousTs uint64
+	var curr *Spanset
+	var dedupeCurr bool
+	var spanDedupe map[uint64]struct{}
 
-	for tree.Next() {
-		next := tree.Winner()
-		traceID := next.ss.TraceID
-		span := next.ss.Spans[next.i]
-
-		/*if e.checkTime {
-			st := span.StartTimeUnixNanos()
+	checkOnly := func(s Span, dedupe bool) bool {
+		st := s.StartTimeUnixNanos()
+		if e.checkTime {
 			if st < e.start || st >= e.end {
-				continue
-			}
-		}*/
-
-		if e.dedupeSpans {
-			if previousTs == span.StartTimeUnixNanos() && bytes.Equal(previousTraceID, traceID) {
-				// Dupe
-				e.spansDeduped++
-				continue
+				// outside time window
+				return false
 			}
 		}
 
-		previousTraceID = traceID
-		previousTs = span.StartTimeUnixNanos()
+		if !dedupe {
+			return true
+		}
 
-		e.spansTotal++
-		e.metricsPipeline.observe(span)
+		if _, ok := spanDedupe[st]; ok {
+			// Dupe
+			e.spansDeduped++
+			return false
+		}
+
+		// New span. Record and continue
+		spanDedupe[st] = struct{}{}
+		return true
+	}
+
+	for tree.Next() {
+		next := tree.Winner().At()
+		dedupeNext := false
+
+		spansetsTotal++
+
+		if curr == nil {
+			curr = next
+			continue
+		}
+
+		if bytes.Equal(curr.TraceID, next.TraceID) {
+			// Same trace. Now see if same spanset
+			if len(curr.Spans) == len(next.Spans) {
+				allDupes := true
+				for i := 0; i < len(curr.Spans); i++ {
+					if curr.Spans[i].StartTimeUnixNanos() != next.Spans[i].StartTimeUnixNanos() {
+						allDupes = false
+						break
+					}
+				}
+				if allDupes {
+					next.Release()
+					e.spansDeduped += uint64(len(next.Spans))
+					spansetsDedupedFast++
+					continue
+				}
+			}
+
+			// Same trace but different spans. We will merge them together.
+			dedupeCurr = true
+			dedupeNext = true
+		}
+
+		if dedupeCurr {
+			spansetsDedupedMap++
+			if spanDedupe == nil {
+				spanDedupe = make(map[uint64]struct{}, len(curr.Spans))
+			}
+		} else {
+			spansetsNotDeduped++
+			spanDedupe = nil
+		}
+
+		for _, s := range curr.Spans {
+			if checkOnly(s, dedupeCurr) {
+				e.metricsPipeline.observe(s)
+				e.spansTotal++
+			}
+		}
+
+		curr.Release()
+		curr = next
+		dedupeCurr = dedupeNext
 	}
 	if err := tree.Err(); err != nil {
 		return err
 	}
+	if curr != nil {
+		if dedupeCurr {
+			if spanDedupe == nil {
+				spanDedupe = make(map[uint64]struct{}, len(curr.Spans))
+			}
+		}
+		for _, s := range curr.Spans {
+			if checkOnly(s, dedupeCurr) {
+				e.metricsPipeline.observe(s)
+				e.spansTotal++
+			}
+		}
+		curr.Release()
+	}
+
+	span.SetTag("spansTotal", e.spansTotal)
+	span.SetTag("spansDeduped", e.spansDeduped)
+	span.SetTag("ssTotal", spansetsTotal)
+	span.SetTag("ssDedupeFast", spansetsDedupedFast)
+	span.SetTag("ssDedupeMap", spansetsDedupedMap)
+	span.SetTag("ssNotDeduped", spansetsNotDeduped)
 
 	for _, r := range responses {
 		e.bytes += r.Bytes()

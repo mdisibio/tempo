@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -334,6 +335,13 @@ func (s *span) setTraceAttrs(attrs []attrVal) {
 	s.traceAttrs = append(s.traceAttrs, attrs...)
 }
 
+func (s *span) anyAttributesMatched() bool {
+	if s.startTimeUnixNanos != 0 {
+		return true
+	}
+	return s.attributesMatched() > 0
+}
+
 // attributesMatched counts all attributes in the map as well as metadata fields like start/end/id
 func (s *span) attributesMatched() int {
 	count := 0
@@ -384,6 +392,7 @@ var spanPool = sync.Pool{
 }
 
 func putSpan(s *span) {
+	sPuts.Add(1)
 	s.id = nil
 	s.startTimeUnixNanos = 0
 	s.durationNanos = 0
@@ -401,12 +410,21 @@ func putSpan(s *span) {
 }
 
 func getSpan() *span {
+	sGets.Add(1)
 	return spanPool.Get().(*span)
 }
 
 var spansetPool = sync.Pool{}
 
+var (
+	ssGets atomic.Uint64
+	ssPuts atomic.Uint64
+	sGets  atomic.Uint64
+	sPuts  atomic.Uint64
+)
+
 func getSpanset() *traceql.Spanset {
+	ssGets.Add(1)
 	ss := spansetPool.Get()
 	if ss == nil {
 		return &traceql.Spanset{
@@ -419,6 +437,7 @@ func getSpanset() *traceql.Spanset {
 
 // putSpanset back into the pool.  Does not repool the spans.
 func putSpanset(ss *traceql.Spanset) {
+	ssPuts.Add(1)
 	ss.Attributes = ss.Attributes[:0]
 	ss.DurationNanos = 0
 	ss.RootServiceName = ""
@@ -1932,7 +1951,12 @@ func (c *spanCollector) KeepGroup(res *parquetquery.IteratorResult) bool {
 		}
 	}
 
-	if c.minAttributes > 0 {
+	/*if c.minAttributes == 1 {
+		if !sp.anyAttributesMatched() {
+			putSpan(sp)
+			return false
+		}
+	} else*/if c.minAttributes > 0 {
 		count := sp.attributesMatched()
 		if count < c.minAttributes {
 			putSpan(sp)

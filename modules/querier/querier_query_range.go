@@ -99,6 +99,11 @@ func (q *Querier) queryBackend(ctx context.Context, req *tempopb.QueryRangeReque
 		loser = v
 	}
 
+	async := false
+	if v, ok := expr.Hints.GetBool("async", unsafe); ok {
+		async = v
+	}
+
 	// Optimization
 	// If there's only 1 block then dedupe not needed.
 	// But it can be overriden with the query hint.
@@ -125,7 +130,7 @@ func (q *Querier) queryBackend(ctx context.Context, req *tempopb.QueryRangeReque
 				EndUnixNanos:   uint64(m.EndTime.UnixNano()),
 			})
 		}
-		err = eval.DoMulti(ctx, fetchers)
+		err = eval.DoMulti(ctx, fetchers, async)
 		if err != nil {
 			return nil, err
 		}

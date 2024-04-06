@@ -1503,6 +1503,9 @@ func (j *JoinIterator) Close() {
 	for _, i := range j.iters {
 		i.Close()
 	}
+	if j.col != nil {
+		j.col.Close()
+	}
 	j.pool.Release(j.at)
 }
 
@@ -1735,6 +1738,9 @@ func (j *LeftJoinIterator) Close() {
 	for _, i := range j.optional {
 		i.Close()
 	}
+	if j.col != nil {
+		j.col.Close()
+	}
 	j.pool.Release(j.at)
 }
 
@@ -1892,6 +1898,7 @@ type GroupCollector interface {
 	Reset()
 	Collect(*IteratorResult)
 	Result() *IteratorResult
+	Close()
 }
 
 // KeyValueGroupPredicate takes key/value pairs and checks if the

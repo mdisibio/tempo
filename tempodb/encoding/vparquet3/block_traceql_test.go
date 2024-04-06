@@ -691,11 +691,11 @@ func BenchmarkBackendBlockGetMetrics(b *testing.B) {
 func BenchmarkBackendBlockQueryRange(b *testing.B) {
 	testCases := []string{
 		"{} | rate()",
-		/*"{} | rate() by (name)",
+		"{} | rate() by (name)",
 		"{} | rate() by (resource.service.name)",
 		"{} | rate() by (span.http.url)", // High cardinality attribute
 		"{resource.service.name=`loki-ingester`} | rate()",
-		"{status=error} | rate()",*/
+		"{status=error} | rate()",
 	}
 
 	var (
@@ -730,7 +730,7 @@ func BenchmarkBackendBlockQueryRange(b *testing.B) {
 
 	for _, tc := range testCases {
 		b.Run(tc, func(b *testing.B) {
-			for _, minutes := range []int{5, 7} {
+			for _, minutes := range []int{7} {
 				b.Run(strconv.Itoa(minutes), func(b *testing.B) {
 					st := meta.StartTime
 					end := st.Add(time.Duration(minutes) * time.Minute)

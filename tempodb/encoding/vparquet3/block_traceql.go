@@ -407,7 +407,9 @@ func (s *span) copy(other *span) {
 	if len(other.id) > 0 {
 		s.id = append(s.id, other.id...)
 	}
-	s.startTimeUnixNanos = other.startTimeUnixNanos
+	if other.startTimeUnixNanos > 0 {
+		s.startTimeUnixNanos = other.startTimeUnixNanos
+	}
 	s.durationNanos = other.durationNanos
 	s.nestedSetParent = other.nestedSetParent
 	s.nestedSetLeft = other.nestedSetLeft
@@ -426,6 +428,10 @@ var spanBufPool = sync.Pool{
 }
 
 func spanBufPoolPut(b []span) {
+	for i := range b {
+		b[i].reset()
+	}
+	// clear(b)
 	spanBufPool.Put(b[:0])
 }
 
@@ -2130,6 +2136,7 @@ func newBatchCollector(requireAtLeastOneMatchOverall bool, minAttributes int, tx
 		requireAtLeastOneMatchOverall: requireAtLeastOneMatchOverall,
 		minAttributes:                 minAttributes,
 		txt:                           txt,
+		buf:                           make([]span, 0, 1000),
 	}
 }
 
@@ -2138,7 +2145,15 @@ func (c *batchCollector) String() string {
 }
 
 func (c *batchCollector) Reset() {
+	for i := range c.buf {
+		c.buf[i].reset()
+	}
 	c.buf = c.buf[:0]
+	/*prevLen := len(c.buf)
+	c.buf = spanBufPool.Get().([]span)
+	if cap(c.buf) < prevLen {
+		c.buf = make([]span, 0, prevLen*2)
+	}*/
 	c.at.Reset()
 }
 
@@ -2146,16 +2161,24 @@ func (c *batchCollector) Collect(res *parquetquery.IteratorResult) {
 	for _, kv := range res.OtherEntries {
 		switch v := kv.Value.(type) {
 		case *span:
-			sp := span{}
-			sp.copy(v)
-			c.buf = append(c.buf, sp)
+			if cap(c.buf) <= len(c.buf) {
+				buf := make([]span, len(c.buf), len(c.buf)*2)
+				copy(buf, c.buf)
+				c.buf = buf
+			}
+
+			buf := c.buf[:len(c.buf)+1]
+			c.buf = buf
+
 			p := &c.buf[len(c.buf)-1]
-			c.at.AppendOtherValue(kv.Key, p)
-			if sp.cbSpanset != nil {
+			p.copy(v)
+
+			// c.at.AppendOtherValue(kv.Key, p)
+			if p.cbSpanset != nil {
 				replaced := false
-				for i, s3 := range sp.cbSpanset.Spans {
+				for i, s3 := range p.cbSpanset.Spans {
 					if x, ok := s3.(*span); ok && x.rowNum == v.rowNum {
-						sp.cbSpanset.Spans[i] = p
+						p.cbSpanset.Spans[i] = p
 						replaced = true
 						break
 					}
@@ -2189,23 +2212,24 @@ func (c *batchCollector) Close() {
 // Creation of the spanset is delayed until the traceCollector.
 func (c *batchCollector) KeepGroup(res *parquetquery.IteratorResult) bool {
 	// First pass over spans and attributes from the AttributeCollector
-	spans := res.OtherEntries[:0]
+	// spans := res.OtherEntries[:0]
 	c.resAttrs = c.resAttrs[:0]
 
 	// fmt.Println("batch collector:", res.RowNumber)
 
 	for _, kv := range res.OtherEntries {
 		switch v := kv.Value.(type) {
-		case *span:
-			spans = append(spans, kv)
+		// case *span:
+		//	spans = append(spans, kv)
 		case traceql.Static:
 			c.resAttrs = append(c.resAttrs, attrVal{newResAttr(kv.Key), v})
 		}
 	}
-	res.OtherEntries = spans
+	// res.OtherEntries = spans
 
 	// Throw out batches without any candidate spans
-	if len(res.OtherEntries) == 0 {
+	// if len(res.OtherEntries) == 0 {
+	if len(c.buf) == 0 {
 		return false
 	}
 
@@ -2226,9 +2250,12 @@ func (c *batchCollector) KeepGroup(res *parquetquery.IteratorResult) bool {
 	}
 
 	// Second pass. Update and further filter the spans
-	spans = res.OtherEntries[:0]
-	for _, e := range res.OtherEntries {
-		span := e.Value.(*span)
+	// spans = res.OtherEntries[:0]
+	// for _, e := range res.OtherEntries {
+	//	span := e.Value.(*span)
+	spans := c.buf[:0]
+	for i := range c.buf {
+		span := &c.buf[i]
 
 		// Copy resource-level attributes to the span
 		// If the span already has an entry for this attribute it
@@ -2243,17 +2270,24 @@ func (c *batchCollector) KeepGroup(res *parquetquery.IteratorResult) bool {
 			}
 		}
 
-		spans = append(spans, e)
+		spans = append(spans, *span)
 
 	}
-	res.OtherEntries = spans
+	// res.OtherEntries = spans
+	c.buf = spans
 
 	// Throw out batches without any remaining spans
-	if len(res.OtherEntries) == 0 {
+	// if len(res.OtherEntries) == 0 {
+	if len(c.buf) == 0 {
 		return false
 	}
 
 	res.Entries = res.Entries[:0]
+	res.OtherEntries = res.OtherEntries[:0]
+	for i := range c.buf {
+		res.AppendOtherValue(otherEntrySpanKey, &c.buf[i])
+	}
+	// res.AppendOtherValue("buf", c.buf)
 	return true
 }
 
@@ -2263,7 +2297,7 @@ func (c *batchCollector) KeepGroup(res *parquetquery.IteratorResult) bool {
 type traceCollector struct {
 	// traceAttrs is a slice reused by KeepGroup to reduce allocations
 	traceAttrs []attrVal
-	buf        []span
+	bufs       [][]span
 	at         *parquetquery.IteratorResult
 	txt        string
 }
@@ -2272,9 +2306,9 @@ var _ parquetquery.GroupPredicate = (*traceCollector)(nil)
 
 func newTraceCollector(txt string) *traceCollector {
 	return &traceCollector{
-		txt: txt,
-		at:  pqTracePool.Get(),
-		buf: spanBufPool.Get().([]span),
+		txt:  txt,
+		at:   pqTracePool.Get(),
+		bufs: nil,
 	}
 }
 
@@ -2283,19 +2317,13 @@ func (c *traceCollector) String() string {
 }
 
 func (c *traceCollector) Reset() {
-	c.buf = c.buf[:0]
+	for i := range c.bufs {
+		spanBufPoolPut(c.bufs[i])
+	}
+	c.bufs = c.bufs[:0]
+	c.traceAttrs = c.traceAttrs[:0]
 	c.at.Reset()
 }
-
-/*func (c *traceCollector) realloc(addl int) {
-	newLen := len(c.buf) + addl
-	if cap(c.buf) < newLen {
-		new := make([]span, len(c.buf), newLen+10000)
-		copy(new, c.buf)
-		// spanBufPoolPut(c.buf)
-		c.buf = new
-	}
-}*/
 
 func (c *traceCollector) Collect(res *parquetquery.IteratorResult) {
 	if len(res.OtherEntries) > 0 {
@@ -2306,23 +2334,69 @@ func (c *traceCollector) Collect(res *parquetquery.IteratorResult) {
 				newspans++
 			}
 		}
-		c.realloc(newspans)*/
+
+
+		buf := c.bufs[len(c.bufs)-1]
+
+		if cap(buf) < len(buf)+newspans {
+			buf = spanBufPool.Get().([]span)
+			c.bufs = append(c.bufs, buf)
+		}*/
+
+		/*var buf []span
+		if cap(c.bufs) > len(c.bufs) {
+			c.bufs = c.bufs[:len(c.bufs)+1]
+			buf = c.bufs[len(c.bufs)-1]
+			// c.bufs[len(c.bufs)-1] = buf
+		} else {
+			buf = spanBufPool.Get().([]span)
+			c.bufs = append(c.bufs, buf)
+		}*/
+
+		//buf := spanBufPool.Get().([]span)
+		/*if cap(buf) == 0 {
+			buf = spanBufPool.Get().([]span)
+		}*/
+		/*if cap(buf) < newspans {
+			buf = make([]span, newspans, newspans*2)
+		}
+		buf = buf[:newspans]*/
+		// c.bufs[len(c.bufs)-1] = buf
+
+		// i := 0
 
 		for _, e := range res.OtherEntries {
 			switch e.Key {
+			// case "buf":
+			//	buf := e.Value.([]span)
+			//	c.bufs = append(c.bufs, buf)
 			case otherEntrySpanKey:
+				if len(c.bufs) == 0 {
+					c.bufs = append(c.bufs, spanBufPool.Get().([]span))
+				}
+				buf := c.bufs[len(c.bufs)-1]
+
+				if cap(buf) <= len(buf) {
+					buf = spanBufPool.Get().([]span)
+					c.bufs = append(c.bufs, buf)
+				}
+
 				sp := e.Value.(*span)
-				s := span{}
-				s.copy(sp)
-				c.buf = append(c.buf, s)
-				p := &c.buf[len(c.buf)-1]
+				// s := span{}
+				// s.copy(sp)
+				buf = buf[:len(buf)+1]
+				c.bufs[len(c.bufs)-1] = buf
+
+				p := &buf[len(buf)-1]
+				p.copy(sp)
+				// i++
 				// c.at.AppendOtherValue(otherEntrySpanKey, p)
 
-				if s.cbSpanset != nil {
+				if p.cbSpanset != nil {
 					replaced := false
-					for i, s3 := range s.cbSpanset.Spans {
+					for i, s3 := range p.cbSpanset.Spans {
 						if x, ok := s3.(*span); ok && x.rowNum == sp.rowNum {
-							s.cbSpanset.Spans[i] = p
+							p.cbSpanset.Spans[i] = p
 							replaced = true
 							break
 						}
@@ -2332,11 +2406,13 @@ func (c *traceCollector) Collect(res *parquetquery.IteratorResult) {
 					}
 				}
 
-				// fmt.Println("trace collector", c.txt, "got span:", s.rowNum)
+			// fmt.Println("trace collector", c.txt, "got span:", s.rowNum)*/
 			default:
 				c.at.AppendOtherValue(e.Key, e.Value)
 			}
 		}
+
+		// c.bufs = append(c.bufs, buf)
 	}
 
 	for _, e := range res.Entries {
@@ -2350,7 +2426,10 @@ func (c *traceCollector) Result() *parquetquery.IteratorResult {
 
 func (c *traceCollector) Close() {
 	pqTracePool.Release(c.at)
-	spanBufPoolPut(c.buf)
+	// spanBufPoolPut(c.buf)
+	for i := range c.bufs {
+		spanBufPoolPut(c.bufs[i])
+	}
 }
 
 // KeepGroup is called once per trace and creates its final spanset
@@ -2382,10 +2461,16 @@ func (c *traceCollector) KeepGroup(res *parquetquery.IteratorResult) bool {
 
 	// Pre-allocate the final number of spans
 	numSpans := 0
-	for _, e := range res.OtherEntries {
+	/*for _, e := range res.OtherEntries {
 		if _, ok := e.Value.(*span); ok {
 			numSpans++
 		}
+	}
+	if cap(finalSpanset.Spans) < numSpans {
+		finalSpanset.Spans = make([]traceql.Span, 0, numSpans)
+	}*/
+	for _, b := range c.bufs {
+		numSpans += len(b)
 	}
 	if cap(finalSpanset.Spans) < numSpans {
 		finalSpanset.Spans = make([]traceql.Span, 0, numSpans)
@@ -2403,10 +2488,17 @@ func (c *traceCollector) KeepGroup(res *parquetquery.IteratorResult) bool {
 			finalSpanset.Spans = append(finalSpanset.Spans, span)
 		}
 	}*/
-	for i := range c.buf {
+	/*for i := range c.buf {
 		p := &c.buf[i]
 		p.setTraceAttrs(c.traceAttrs)
 		finalSpanset.Spans = append(finalSpanset.Spans, p)
+	}*/
+	for _, b := range c.bufs {
+		for i := range b {
+			p := &b[i]
+			p.setTraceAttrs(c.traceAttrs)
+			finalSpanset.Spans = append(finalSpanset.Spans, p)
+		}
 	}
 
 	// loop over all spans and add the trace-level attributes

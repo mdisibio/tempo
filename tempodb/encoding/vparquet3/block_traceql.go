@@ -395,11 +395,18 @@ func (s *span) reset() {
 }
 
 func (s *span) copy(other *span) {
-	s.spanAttrs = append(s.spanAttrs, other.spanAttrs...)
-	s.resourceAttrs = append(s.resourceAttrs, other.resourceAttrs...)
-	s.traceAttrs = append(s.traceAttrs, other.traceAttrs...)
-
-	s.id = append(s.id, other.id...)
+	if len(other.spanAttrs) > 0 {
+		s.spanAttrs = append(s.spanAttrs, other.spanAttrs...)
+	}
+	if len(other.resourceAttrs) > 0 {
+		s.resourceAttrs = append(s.resourceAttrs, other.resourceAttrs...)
+	}
+	if len(other.traceAttrs) > 0 {
+		s.traceAttrs = append(s.traceAttrs, other.traceAttrs...)
+	}
+	if len(other.id) > 0 {
+		s.id = append(s.id, other.id...)
+	}
 	s.startTimeUnixNanos = other.startTimeUnixNanos
 	s.durationNanos = other.durationNanos
 	s.nestedSetParent = other.nestedSetParent
@@ -2280,34 +2287,55 @@ func (c *traceCollector) Reset() {
 	c.at.Reset()
 }
 
-func (c *traceCollector) Collect(res *parquetquery.IteratorResult) {
-	for _, e := range res.OtherEntries {
-		switch e.Key {
-		case otherEntrySpanKey:
-			sp := e.Value.(*span)
-			s := span{}
-			s.copy(sp)
-			c.buf = append(c.buf, s)
-			p := &c.buf[len(c.buf)-1]
-			c.at.AppendOtherValue(otherEntrySpanKey, p)
+/*func (c *traceCollector) realloc(addl int) {
+	newLen := len(c.buf) + addl
+	if cap(c.buf) < newLen {
+		new := make([]span, len(c.buf), newLen+10000)
+		copy(new, c.buf)
+		// spanBufPoolPut(c.buf)
+		c.buf = new
+	}
+}*/
 
-			if s.cbSpanset != nil {
-				replaced := false
-				for i, s3 := range s.cbSpanset.Spans {
-					if x, ok := s3.(*span); ok && x.rowNum == sp.rowNum {
-						s.cbSpanset.Spans[i] = p
-						replaced = true
-						break
+func (c *traceCollector) Collect(res *parquetquery.IteratorResult) {
+	if len(res.OtherEntries) > 0 {
+		/*newspans := 0
+		for _, e := range res.OtherEntries {
+			switch e.Key {
+			case otherEntrySpanKey:
+				newspans++
+			}
+		}
+		c.realloc(newspans)*/
+
+		for _, e := range res.OtherEntries {
+			switch e.Key {
+			case otherEntrySpanKey:
+				sp := e.Value.(*span)
+				s := span{}
+				s.copy(sp)
+				c.buf = append(c.buf, s)
+				p := &c.buf[len(c.buf)-1]
+				// c.at.AppendOtherValue(otherEntrySpanKey, p)
+
+				if s.cbSpanset != nil {
+					replaced := false
+					for i, s3 := range s.cbSpanset.Spans {
+						if x, ok := s3.(*span); ok && x.rowNum == sp.rowNum {
+							s.cbSpanset.Spans[i] = p
+							replaced = true
+							break
+						}
+					}
+					if !replaced {
+						panic("trace crap")
 					}
 				}
-				if !replaced {
-					panic("trace crap")
-				}
-			}
 
-			// fmt.Println("trace collector", c.txt, "got span:", s.rowNum)
-		default:
-			c.at.AppendOtherValue(e.Key, e.Value)
+				// fmt.Println("trace collector", c.txt, "got span:", s.rowNum)
+			default:
+				c.at.AppendOtherValue(e.Key, e.Value)
+			}
 		}
 	}
 
@@ -2366,7 +2394,7 @@ func (c *traceCollector) KeepGroup(res *parquetquery.IteratorResult) bool {
 		finalSpanset.Spans = make([]traceql.Span, 0, len(c.buf))
 	}*/
 
-	for i, e := range res.OtherEntries {
+	/*for i, e := range res.OtherEntries {
 		if span, ok := e.Value.(*span); ok {
 			if span.rowNum != c.buf[i].rowNum {
 				panic("wtf")
@@ -2374,12 +2402,12 @@ func (c *traceCollector) KeepGroup(res *parquetquery.IteratorResult) bool {
 			span.setTraceAttrs(c.traceAttrs)
 			finalSpanset.Spans = append(finalSpanset.Spans, span)
 		}
-	}
-	/*for i := range c.buf {
+	}*/
+	for i := range c.buf {
 		p := &c.buf[i]
 		p.setTraceAttrs(c.traceAttrs)
 		finalSpanset.Spans = append(finalSpanset.Spans, p)
-	}*/
+	}
 
 	// loop over all spans and add the trace-level attributes
 	/*for _, s := range finalSpanset.Spans {

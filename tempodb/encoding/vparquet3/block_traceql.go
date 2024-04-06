@@ -725,6 +725,8 @@ func (i *bridgeIterator) Next() (*parquetquery.IteratorResult, error) {
 		return i.spanToIteratorResult(ret), nil
 	}
 
+	i.nextSpans = i.nextSpans[:0]
+
 	for {
 		res, err := i.iter.Next()
 		if err != nil {
@@ -775,9 +777,9 @@ func (i *bridgeIterator) Next() (*parquetquery.IteratorResult, error) {
 				p := &i.nextSpans[len(i.nextSpans)-1]
 
 				replaced := false
-				for i, s3 := range sp2.cbSpanset.Spans {
+				for i, s3 := range p.cbSpanset.Spans {
 					if x, ok := s3.(*span); ok && x.rowNum == p.rowNum {
-						sp2.cbSpanset.Spans[i] = p
+						p.cbSpanset.Spans[i] = p
 						replaced = true
 						break
 					}
@@ -862,6 +864,8 @@ func (i *rebatchIterator) Next() (*parquetquery.IteratorResult, error) {
 		if res != nil {
 			return res, nil
 		}
+
+		i.nextSpans = i.nextSpans[:0]
 
 		// check the iterator for anything
 		res, err := i.iter.Next()

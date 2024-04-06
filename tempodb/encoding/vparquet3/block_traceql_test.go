@@ -690,12 +690,12 @@ func BenchmarkBackendBlockGetMetrics(b *testing.B) {
 
 func BenchmarkBackendBlockQueryRange(b *testing.B) {
 	testCases := []string{
-		"{} | rate()",
-		"{} | rate() by (name)",
-		"{} | rate() by (resource.service.name)",
+		//"{} | rate()",
+		//"{} | rate() by (name)",
+		//"{} | rate() by (resource.service.name)",
 		"{} | rate() by (span.http.url)", // High cardinality attribute
-		"{resource.service.name=`loki-ingester`} | rate()",
-		"{status=error} | rate()",
+		//"{resource.service.name=`loki-ingester`} | rate()",
+		//"{status=error} | rate()",
 	}
 
 	var (
@@ -730,7 +730,7 @@ func BenchmarkBackendBlockQueryRange(b *testing.B) {
 
 	for _, tc := range testCases {
 		b.Run(tc, func(b *testing.B) {
-			for _, minutes := range []int{7} {
+			for _, minutes := range []int{2} {
 				b.Run(strconv.Itoa(minutes), func(b *testing.B) {
 					st := meta.StartTime
 					end := st.Add(time.Duration(minutes) * time.Minute)
@@ -745,8 +745,8 @@ func BenchmarkBackendBlockQueryRange(b *testing.B) {
 						Step:       uint64(time.Minute),
 						Start:      uint64(st.UnixNano()),
 						End:        uint64(end.UnixNano()),
-						ShardID:    30,
-						ShardCount: 65,
+						ShardID:    300,
+						ShardCount: 650,
 					}
 
 					eval, err := e.CompileMetricsQueryRange(req, false, 0, false)

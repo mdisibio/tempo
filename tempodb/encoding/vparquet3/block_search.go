@@ -193,12 +193,12 @@ func makePipelineWithRowGroups(ctx context.Context, req *tempopb.SearchRequest, 
 			pq.NewJoinIterator(DefinitionLevelResourceAttrs, []pq.Iterator{
 				makeIter(FieldResourceAttrKey, keyPred, "keys"),
 				makeIter(FieldResourceAttrVal, valPred, "values"),
-			}, nil),
+			}, nil, nil),
 			// This iterator finds all keys/values at the span level
 			pq.NewJoinIterator(DefinitionLevelResourceSpansILSSpanAttrs, []pq.Iterator{
 				makeIter(FieldSpanAttrKey, keyPred, "keys"),
 				makeIter(FieldSpanAttrVal, valPred, "values"),
-			}, nil),
+			}, nil, nil),
 		}, pq.NewKeyValueGroupPredicate(keys, vals))
 
 		resourceIters = append(resourceIters, j)
@@ -210,7 +210,7 @@ func makePipelineWithRowGroups(ctx context.Context, req *tempopb.SearchRequest, 
 		traceIters = append(traceIters, resourceIters[0])
 	}
 	if len(resourceIters) > 1 {
-		traceIters = append(traceIters, pq.NewJoinIterator(DefinitionLevelTrace, resourceIters, nil))
+		traceIters = append(traceIters, pq.NewJoinIterator(DefinitionLevelTrace, resourceIters, nil, nil))
 	}
 
 	// Duration filtering?
@@ -255,7 +255,7 @@ func makePipelineWithRowGroups(ctx context.Context, req *tempopb.SearchRequest, 
 
 	default:
 		// Join all conditions
-		return pq.NewJoinIterator(DefinitionLevelTrace, traceIters, nil)
+		return pq.NewJoinIterator(DefinitionLevelTrace, traceIters, nil, nil)
 	}
 }
 
@@ -323,7 +323,7 @@ func rawToResults(ctx context.Context, pf *parquet.File, rgs []parquet.RowGroup,
 		makeIter("RootSpanName", nil, "RootSpanName"),
 		makeIter("StartTimeUnixNano", nil, "StartTimeUnixNano"),
 		makeIter("DurationNano", nil, "DurationNano"),
-	}, nil)
+	}, nil, nil)
 	defer iter2.Close()
 
 	for {

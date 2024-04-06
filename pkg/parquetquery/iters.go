@@ -348,6 +348,7 @@ type IteratorResult struct {
 }
 
 func (r *IteratorResult) Reset() {
+	r.RowNumber = EmptyRowNumber()
 	r.Entries = r.Entries[:0]
 	r.OtherEntries = r.OtherEntries[:0]
 }
@@ -1326,19 +1327,21 @@ type JoinIterator struct {
 	lowestIters     []int
 	peeks           []*IteratorResult
 	pred            GroupPredicate
+	col             GroupCollector
 	pool            *ResultPool
 	at              *IteratorResult
 }
 
 var _ Iterator = (*JoinIterator)(nil)
 
-func NewJoinIterator(definitionLevel int, iters []Iterator, pred GroupPredicate, opts ...JoinIteratorOption) *JoinIterator {
+func NewJoinIterator(definitionLevel int, iters []Iterator, pred GroupPredicate, col GroupCollector, opts ...JoinIteratorOption) *JoinIterator {
 	j := &JoinIterator{
 		definitionLevel: definitionLevel,
 		iters:           iters,
 		lowestIters:     make([]int, len(iters)),
 		peeks:           make([]*IteratorResult, len(iters)),
 		pred:            pred,
+		col:             col,
 		pool:            DefaultPool,
 	}
 
@@ -1469,14 +1472,29 @@ func (j *JoinIterator) collect(rowNumber RowNumber) (*IteratorResult, error) {
 	result.Reset()
 	result.RowNumber = rowNumber
 
+	if j.col != nil {
+		j.col.Reset()
+	}
+
 	for i := range j.iters {
 		for j.peeks[i] != nil && EqualRowNumber(j.definitionLevel, j.peeks[i].RowNumber, rowNumber) {
-			result.Append(j.peeks[i])
+
+			if j.col != nil {
+				j.col.Collect(j.peeks[i])
+			} else {
+				result.Append(j.peeks[i])
+			}
+
 			j.peeks[i], err = j.iters[i].Next()
 			if err != nil {
 				return nil, err
 			}
 		}
+	}
+
+	if j.col != nil {
+		r := j.col.Result()
+		result.Append(r)
 	}
 	return result, nil
 }
@@ -1498,13 +1516,14 @@ type LeftJoinIterator struct {
 	lowestIters                  []int
 	peeksRequired, peeksOptional []*IteratorResult
 	pred                         GroupPredicate
+	col                          GroupCollector
 	pool                         *ResultPool
 	at                           *IteratorResult
 }
 
 var _ Iterator = (*LeftJoinIterator)(nil)
 
-func NewLeftJoinIterator(definitionLevel int, required, optional []Iterator, pred GroupPredicate, opts ...LeftJoinIteratorOption) (*LeftJoinIterator, error) {
+func NewLeftJoinIterator(definitionLevel int, required, optional []Iterator, pred GroupPredicate, col GroupCollector, opts ...LeftJoinIteratorOption) (*LeftJoinIterator, error) {
 	// No query should ever result in a left-join with no required iterators.
 	// If this happens, it's a bug in the iter building code.
 	// LeftJoinIterator is not designed to handle this case and will loop forever.
@@ -1521,6 +1540,7 @@ func NewLeftJoinIterator(definitionLevel int, required, optional []Iterator, pre
 		peeksOptional:   make([]*IteratorResult, len(optional)),
 		pred:            pred,
 		pool:            DefaultPool,
+		col:             col,
 	}
 
 	for _, opt := range opts {
@@ -1662,12 +1682,21 @@ func (j *LeftJoinIterator) collect(rowNumber RowNumber) (*IteratorResult, error)
 	result.Reset()
 	result.RowNumber = rowNumber
 
+	if j.col != nil {
+		j.col.Reset()
+	}
+
 	collect := func(iters []Iterator, peeks []*IteratorResult) {
 		for i := range iters {
 			// Collect matches
 			for peeks[i] != nil && EqualRowNumber(j.definitionLevel, peeks[i].RowNumber, rowNumber) {
-				result.Append(peeks[i])
-				// peeks[i].Release()
+
+				if j.col != nil {
+					j.col.Collect(peeks[i])
+				} else {
+					result.Append(peeks[i])
+				}
+
 				peeks[i], err = iters[i].Next()
 				if err != nil {
 					return
@@ -1689,6 +1718,11 @@ func (j *LeftJoinIterator) collect(rowNumber RowNumber) (*IteratorResult, error)
 	collect(j.optional, j.peeksOptional)
 	if err != nil {
 		return nil, err
+	}
+
+	if j.col != nil {
+		r := j.col.Result()
+		result.Append(r)
 	}
 
 	return result, nil
@@ -1850,6 +1884,14 @@ type GroupPredicate interface {
 	fmt.Stringer
 
 	KeepGroup(*IteratorResult) bool
+}
+
+type GroupCollector interface {
+	fmt.Stringer
+
+	Reset()
+	Collect(*IteratorResult)
+	Result() *IteratorResult
 }
 
 // KeyValueGroupPredicate takes key/value pairs and checks if the

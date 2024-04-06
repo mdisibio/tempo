@@ -289,7 +289,7 @@ func createDistinctSpanIterator(
 
 	// Left join here means the span id/start/end iterators + 1 are required,
 	// and all other conditions are optional. Whatever matches is returned.
-	return parquetquery.NewJoinIterator(DefinitionLevelResourceSpansILSSpan, iters, spanCol), nil
+	return parquetquery.NewJoinIterator(DefinitionLevelResourceSpansILSSpan, iters, spanCol, nil), nil
 }
 
 func createDistinctAttributeIterator(
@@ -370,7 +370,7 @@ func createDistinctAttributeIterator(
 			continue
 		}
 
-		iters = append(iters, parquetquery.NewJoinIterator(definitionLevel, []parquetquery.Iterator{keyIter, valIter}, nil))
+		iters = append(iters, parquetquery.NewJoinIterator(definitionLevel, []parquetquery.Iterator{keyIter, valIter}, nil, nil))
 	}
 
 	var valueIters []parquetquery.Iterator
@@ -397,6 +397,7 @@ func createDistinctAttributeIterator(
 					scope: scopeFromDefinitionLevel(definitionLevel),
 					keep:  keep,
 				},
+				nil,
 			)
 			if err != nil {
 				return nil, fmt.Errorf("creating left join iterator: %w", err)
@@ -406,6 +407,7 @@ func createDistinctAttributeIterator(
 		return parquetquery.NewJoinIterator(
 			oneLevelUp(definitionLevel),
 			iters,
+			nil,
 			nil,
 		), nil
 	}
@@ -521,7 +523,7 @@ func createDistinctResourceIterator(
 		iters = append(iters, spanIterator)
 	}
 
-	return parquetquery.NewJoinIterator(DefinitionLevelResourceSpans, iters, batchCol), nil
+	return parquetquery.NewJoinIterator(DefinitionLevelResourceSpans, iters, batchCol, nil), nil
 }
 
 func createDistinctTraceIterator(
@@ -578,7 +580,7 @@ func createDistinctTraceIterator(
 	// TraceCollor adds trace-level data to the spansets
 	return parquetquery.NewJoinIterator(DefinitionLevelTrace, traceIters, &distinctTraceCollector{
 		keep: keep,
-	}), nil
+	}, nil), nil
 }
 
 type keepFn func(attr traceql.Attribute) bool

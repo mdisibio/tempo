@@ -337,7 +337,7 @@ func searchKeyValues(definitionLevel int, keyPath, stringPath, intPath, floatPat
 			makeIter(intPath, skipNils, "int"),
 			makeIter(floatPath, skipNils, "float"),
 			makeIter(boolPath, skipNils, "bool"),
-		}, nil)
+		}, nil, nil)
 	if err != nil {
 		return fmt.Errorf("pq.NewLeftJoinIterator failed: %w", err)
 	}

@@ -54,7 +54,9 @@ func TestBackendBlockSearchTraceQL(t *testing.T) {
 	numTraces := 250
 	traces := make([]*Trace, 0, numTraces)
 	wantTraceIdx := rand.Intn(numTraces)
+	// fmt.Println("Want trace is:", wantTraceIdx)
 	wantTraceID := test.ValidTraceID(nil)
+	// fmt.Println("Want ID is:", wantTraceID)
 
 	for i := 0; i < numTraces; i++ {
 		if i == wantTraceIdx {
@@ -245,6 +247,7 @@ func TestBackendBlockSearchTraceQL(t *testing.T) {
 				if spanSet == nil {
 					break
 				}
+				// fmt.Println("Got result:", spanSet.TraceID)
 				found = bytes.Equal(spanSet.TraceID, wantTraceID)
 				if found {
 					break
@@ -688,11 +691,11 @@ func BenchmarkBackendBlockGetMetrics(b *testing.B) {
 func BenchmarkBackendBlockQueryRange(b *testing.B) {
 	testCases := []string{
 		"{} | rate()",
-		"{} | rate() by (name)",
+		/*"{} | rate() by (name)",
 		"{} | rate() by (resource.service.name)",
 		"{} | rate() by (span.http.url)", // High cardinality attribute
 		"{resource.service.name=`loki-ingester`} | rate()",
-		"{status=error} | rate()",
+		"{status=error} | rate()",*/
 	}
 
 	var (

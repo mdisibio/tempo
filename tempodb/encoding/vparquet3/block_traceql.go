@@ -2302,6 +2302,7 @@ type traceCollector struct {
 	// traceAttrs is a slice reused by KeepGroup to reduce allocations
 	traceAttrs []attrVal
 	bufs       [][]span
+	freeBufs   [][]span
 	at         *parquetquery.IteratorResult
 	txt        string
 }
@@ -2310,9 +2311,9 @@ var _ parquetquery.GroupPredicate = (*traceCollector)(nil)
 
 func newTraceCollector(txt string) *traceCollector {
 	return &traceCollector{
-		txt:  txt,
-		at:   pqTracePool.Get(),
-		bufs: nil,
+		txt: txt,
+		at:  pqTracePool.Get(),
+		// bufs: nil,
 	}
 }
 
@@ -2320,9 +2321,49 @@ func (c *traceCollector) String() string {
 	return "traceCollector()"
 }
 
+func (c *traceCollector) getsp() *span {
+	// Check current buf
+	if len(c.bufs) > 0 {
+		buf := c.bufs[len(c.bufs)-1]
+		if len(buf) < cap(buf) {
+			// There is rooom
+			// Reslice to increase len and return
+			buf = buf[:len(buf)+1]
+			c.bufs[len(c.bufs)-1] = buf
+			return &buf[len(buf)-1]
+		}
+	}
+	// Out of room in current buffer
+	// Get a new one
+	if len(c.freeBufs) > 0 {
+		// Pop from end of free list
+		c.bufs = append(c.bufs, c.freeBufs[len(c.freeBufs)-1])
+		c.freeBufs = c.freeBufs[:len(c.freeBufs)-1]
+
+		// If free list is exhausted then reset
+		/*if len(c.freeBufs) == 0 {
+			c.freeBufs = c.freeBufs[:0]
+		}*/
+	} else {
+		// Get one from the pool
+		c.bufs = append(c.bufs, spanBufPool.Get().([]span))
+	}
+
+	// Now we have either gotten a fresh buf from the free list or the
+	// pool. Reslice to increase len and return
+	buf := c.bufs[len(c.bufs)-1]
+	buf = buf[:len(buf)+1]
+	c.bufs[len(c.bufs)-1] = buf
+	return &buf[len(buf)-1]
+}
+
 func (c *traceCollector) Reset() {
-	for i := range c.bufs {
-		spanBufPoolPut(c.bufs[i])
+	// Clear and return all to the free pool
+	for _, b := range c.bufs {
+		for j := range b {
+			b[j].reset()
+		}
+		c.freeBufs = append(c.freeBufs, b[:0])
 	}
 	c.bufs = c.bufs[:0]
 	c.traceAttrs = c.traceAttrs[:0]
@@ -2375,23 +2416,16 @@ func (c *traceCollector) Collect(res *parquetquery.IteratorResult) {
 			//	buf := e.Value.([]span)
 			//	c.bufs = append(c.bufs, buf)
 			case otherEntrySpanKey:
-				if len(c.bufs) == 0 {
-					c.bufs = append(c.bufs, spanBufPool.Get().([]span))
-				}
-				buf := c.bufs[len(c.bufs)-1]
-
-				if cap(buf) <= len(buf) {
-					buf = spanBufPool.Get().([]span)
-					c.bufs = append(c.bufs, buf)
-				}
 
 				sp := e.Value.(*span)
 				// s := span{}
 				// s.copy(sp)
-				buf = buf[:len(buf)+1]
-				c.bufs[len(c.bufs)-1] = buf
+				// buf = buf[:len(buf)+1]
+				// c.bufs[len(c.bufs)-1] = buf
 
-				p := &buf[len(buf)-1]
+				// p := &buf[len(buf)-1]
+				// p.copy(sp)
+				p := c.getsp()
 				p.copy(sp)
 				// i++
 				// c.at.AppendOtherValue(otherEntrySpanKey, p)
@@ -2431,8 +2465,12 @@ func (c *traceCollector) Result() *parquetquery.IteratorResult {
 func (c *traceCollector) Close() {
 	pqTracePool.Release(c.at)
 	// spanBufPoolPut(c.buf)
+	// Return all to the shared pool
 	for i := range c.bufs {
 		spanBufPoolPut(c.bufs[i])
+	}
+	for i := range c.freeBufs {
+		spanBufPoolPut(c.freeBufs[i])
 	}
 }
 

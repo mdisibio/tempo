@@ -169,7 +169,7 @@ func testCompactionRoundtrip(t *testing.T, targetBlockVersion string) {
 	rw.pollBlocklist()
 
 	blocklist := rw.blocklist.Metas(testTenantID)
-	blockSelector := newTimeWindowBlockSelector(blocklist, rw.compactorCfg.MaxCompactionRange, 10000, 1024*1024*1024, defaultMinInputBlocks, 2)
+	blockSelector := newTimeWindowBlockSelector(blocklist, rw.compactorCfg.MaxCompactionRange, 10000, 1024*1024*1024, DefaultMinInputBlocks, 2)
 
 	expectedCompactions := len(blocklist) / inputBlocks
 	compactions := 0
@@ -337,7 +337,7 @@ func testSameIDCompaction(t *testing.T, targetBlockVersion string) {
 
 	var blocks []*backend.BlockMeta
 	list := rw.blocklist.Metas(testTenantID)
-	blockSelector := newTimeWindowBlockSelector(list, rw.compactorCfg.MaxCompactionRange, 10000, 1024*1024*1024, defaultMinInputBlocks, blockCount)
+	blockSelector := newTimeWindowBlockSelector(list, rw.compactorCfg.MaxCompactionRange, 10000, 1024*1024*1024, DefaultMinInputBlocks, blockCount)
 	comp := blockSelector.BlocksToCompact()
 	blocks = comp.Blocks()
 	require.Len(t, blocks, blockCount)

@@ -82,14 +82,24 @@ func newShardingBlockSelector(shards int, blocklist []*backend.BlockMeta, maxCom
 	}
 
 	var (
-		now        = time.Now()
-		currWindow = s.windowForTime(now)
+		now          = time.Now()
+		currWindow   = s.windowForTime(now)
+		activeWindow = s.windowForTime(now.Add(-activeWindowDuration))
 	)
 
 	for _, b := range blocklist {
 
+		w := s.windowForBlock(b)
+
+		// exclude blocks that fall in last window from active -> inactive cut-over
+		// blocks in this window will not be compacted in order to avoid
+		// ownership conflicts where two compactors process the same block
+		// at the same time as it transitions from last active window to first inactive window.
+		if w == activeWindow {
+			continue
+		}
+
 		var (
-			w     = s.windowForBlock(b)
 			shard = s.shardOf(b.MinID)
 
 			// These are all of the numeric values that we can group and order by,
@@ -112,10 +122,10 @@ func newShardingBlockSelector(shards int, blocklist []*backend.BlockMeta, maxCom
 		}
 
 		switch {
-		case b.CompactionLevel > 0 && shardMin == shardMax:
-			// This is a previously split block that contains only a single shard.
-			// Combine/dedupe with other blocks in the same window and shard.
-			// This is prioritized over splitting new blocks to keep the block count down.
+		case b.CompactionLevel == 1 && shardMin == shardMax:
+			// First level of well-sharded blocks.  This is prioritized
+			// over splitting new blocks to keep the block count down. This step
+			// consumes work generated from the next step.
 			entry.group = join(
 				"A",            // Highest priority
 				age,            // prioritize newer windows (more recent data)
@@ -125,16 +135,15 @@ func newShardingBlockSelector(shards int, blocklist []*backend.BlockMeta, maxCom
 				columns,        //
 			)
 			entry.hash = join(
-				b.TenantID, // Work sharding by tenant, window
+				b.TenantID, // Work sharding by tenant, window, and shard
 				window,     //
-				shardMin,   // and shard
+				shardMin,   //
 			)
 
-		case b.CompactionLevel == 0:
+		case b.CompactionLevel == 0 && shardMin != shardMax:
 			// Unsharded new block that needs to be split. This step generates work
-			// for the above step. MinBlocks=1 allows stray single blocks to still be split.
+			// for the above step.
 			entry.split = true
-			entry.minBlocks = 1
 			entry.group = join(
 				"B",            // Second priority
 				age,            //
@@ -147,6 +156,33 @@ func newShardingBlockSelector(shards int, blocklist []*backend.BlockMeta, maxCom
 				window,     //
 			)
 
+		case shardMin == shardMax:
+			// Higher-level well-sharded blocks. Combine/dedupe with other
+			// blocks in the same window and shard. When inside active window
+			// we also sort and group by level to address the smallest blocks
+			// first.
+
+			if w < activeWindow {
+				// Older than active window. We don't group by level now.
+				level = ""
+			}
+
+			entry.group = join(
+				"C",            // Highest priority
+				age,            // prioritize newer windows (more recent data)
+				shardMin,       // same shard
+				level,          // Same level (when inside active window)
+				b.Version,      //
+				b.DataEncoding, // same block format and column config
+				columns,        //
+			)
+			entry.hash = join(
+				b.TenantID, // Work sharding by tenant, window
+				window,     //
+				shardMin,   // and shard
+				level,
+			)
+
 		default:
 			// Existing block without sharding, or sharded under different settings.
 			// Retroactively upgrade them but only if there is spare compactor
@@ -154,7 +190,7 @@ func newShardingBlockSelector(shards int, blocklist []*backend.BlockMeta, maxCom
 			entry.split = true
 			entry.minBlocks = 1
 			entry.group = join(
-				"C",            // lowest priority
+				"D",            // lowest priority
 				age,            //
 				b.Version,      //
 				b.DataEncoding, //
@@ -170,7 +206,7 @@ func newShardingBlockSelector(shards int, blocklist []*backend.BlockMeta, maxCom
 	}
 
 	// sort by group then order
-	sort.SliceStable(s.entries, func(i, j int) bool {
+	sort.Slice(s.entries, func(i, j int) bool {
 		ei := s.entries[i]
 		ej := s.entries[j]
 
@@ -228,6 +264,7 @@ func (s *shardingBlockSelector) BlocksToCompact() common.CompactionRound {
 			for _, e := range chosen {
 				res.blocks = append(res.blocks, e.meta)
 			}
+			fmt.Println("Choosing group:", chosen[0].group, "num blocks", len(res.blocks))
 			return &res
 		}
 	}

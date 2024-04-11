@@ -28,6 +28,8 @@ const (
 	DefaultRetentionConcurrency      = uint(10)
 	DefaultTenantIndexBuilders       = 2
 	DefaultTolerateConsecutiveErrors = 1
+	DefaultMinInputBlocks            = 2
+	DefaultMaxInputBlocks            = 4
 
 	DefaultPrefetchTraceCount   = 1000
 	DefaultSearchChunkSizeBytes = 1_000_000
@@ -120,6 +122,7 @@ type CompactorConfig struct {
 	IteratorBufferSize      int           `yaml:"v2_prefetch_traces_count"`
 	MaxCompactionRange      time.Duration `yaml:"compaction_window"`
 	MaxCompactionObjects    int           `yaml:"max_compaction_objects"`
+	MaxInputBlocks          int           `yaml:"max_input_blocks"`
 	MaxBlockBytes           uint64        `yaml:"max_block_bytes"`
 	BlockRetention          time.Duration `yaml:"block_retention"`
 	CompactedBlockRetention time.Duration `yaml:"compacted_block_retention"`
@@ -132,6 +135,10 @@ type CompactorConfig struct {
 func (compactorConfig CompactorConfig) validate() error {
 	if compactorConfig.MaxCompactionRange == 0 {
 		return errors.New("Compaction window can't be 0")
+	}
+
+	if compactorConfig.MaxInputBlocks < 2 {
+		return errors.New("compaction max input blocks must be >= 2")
 	}
 
 	return nil

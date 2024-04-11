@@ -149,12 +149,11 @@ func (c *Compactor) Compact(ctx context.Context, l log.Logger, r backend.Reader,
 
 		// ship block to backend if done
 		if currentBlock != nil && cmd.CutBlock(currentBlock.meta, lowestID) {
-			currentBlockPtrCopy := currentBlock
-			currentBlockPtrCopy.meta.StartTime = minBlockStart
-			currentBlockPtrCopy.meta.EndTime = maxBlockEnd
-			err := c.finishBlock(ctx, currentBlockPtrCopy, l)
+			currentBlock.meta.StartTime = minBlockStart
+			currentBlock.meta.EndTime = maxBlockEnd
+			err := c.finishBlock(ctx, currentBlock, l)
 			if err != nil {
-				return nil, fmt.Errorf("error shipping block to backend, blockID %s: %w", currentBlockPtrCopy.meta.BlockID.String(), err)
+				return nil, fmt.Errorf("error shipping block to backend, blockID %s: %w", currentBlock.meta.BlockID.String(), err)
 			}
 			currentBlock = nil
 		}

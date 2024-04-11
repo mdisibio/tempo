@@ -262,15 +262,15 @@ func (rw *readerWriter) blockSelector(tenantID string) CompactionBlockSelector {
 		shards = rw.compactorCfg.Shards
 	}
 
-	if shards > 1 {
+	if shards >= 1 {
 		return newShardingBlockSelector(
 			shards,
 			blocklist,
 			window,
 			rw.compactorCfg.MaxCompactionObjects,
 			rw.compactorCfg.MaxBlockBytes,
-			defaultMinInputBlocks,
-			defaultMaxInputBlocks)
+			DefaultMinInputBlocks,
+			rw.compactorCfg.MaxInputBlocks)
 	}
 
 	return newTimeWindowBlockSelector(
@@ -278,8 +278,8 @@ func (rw *readerWriter) blockSelector(tenantID string) CompactionBlockSelector {
 		window,
 		rw.compactorCfg.MaxCompactionObjects,
 		rw.compactorCfg.MaxBlockBytes,
-		defaultMinInputBlocks,
-		defaultMaxInputBlocks)
+		DefaultMinInputBlocks,
+		rw.compactorCfg.MaxInputBlocks)
 }
 
 func markCompacted(rw *readerWriter, tenantID string, oldBlocks, newBlocks []*backend.BlockMeta) error {

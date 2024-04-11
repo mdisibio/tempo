@@ -769,12 +769,12 @@ func TestTimeWindowBlockSelectorBlocksToCompact(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			min := defaultMinInputBlocks
+			min := DefaultMinInputBlocks
 			if tt.minInputBlocks > 0 {
 				min = tt.minInputBlocks
 			}
 
-			max := defaultMaxInputBlocks
+			max := DefaultMaxInputBlocks
 			if tt.maxInputBlocks > 0 {
 				max = tt.maxInputBlocks
 			}

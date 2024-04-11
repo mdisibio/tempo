@@ -15,9 +15,7 @@ type CompactionBlockSelector interface {
 }
 
 const (
-	activeWindowDuration  = 24 * time.Hour
-	defaultMinInputBlocks = 2
-	defaultMaxInputBlocks = 4
+	activeWindowDuration = 24 * time.Hour
 )
 
 /*************************** Time Window Block Selector **************************/

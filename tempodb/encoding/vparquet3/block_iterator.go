@@ -23,6 +23,7 @@ func (b *backendBlock) open(ctx context.Context) (*parquet.File, *parquet.Reader
 		parquet.SkipBloomFilters(true),
 		parquet.SkipPageIndex(true),
 		parquet.FileSchema(parquetSchema),
+		parquet.FileReadMode(parquet.ReadModeAsync),
 	}
 
 	pf, err := parquet.OpenFile(br, int64(b.meta.Size), o...)

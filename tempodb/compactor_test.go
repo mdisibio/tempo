@@ -123,6 +123,7 @@ func testCompactionRoundtrip(t *testing.T, targetBlockVersion string) {
 		MaxCompactionRange:      24 * time.Hour,
 		BlockRetention:          0,
 		CompactedBlockRetention: 0,
+		MaxInputBlocks:          DefaultMaxInputBlocks,
 	}, &mockSharder{}, &mockOverrides{})
 	require.NoError(t, err)
 
@@ -271,6 +272,7 @@ func testSameIDCompaction(t *testing.T, targetBlockVersion string) {
 		BlockRetention:          0,
 		CompactedBlockRetention: 0,
 		FlushSizeBytes:          10_000_000,
+		MaxInputBlocks:          DefaultMaxInputBlocks,
 	}, &mockSharder{}, &mockOverrides{})
 	require.NoError(t, err)
 
@@ -415,6 +417,7 @@ func TestCompactionUpdatesBlocklist(t *testing.T) {
 		MaxCompactionRange:      24 * time.Hour,
 		BlockRetention:          0,
 		CompactedBlockRetention: 0,
+		MaxInputBlocks:          DefaultMaxInputBlocks,
 	}, &mockSharder{}, &mockOverrides{})
 	require.NoError(t, err)
 
@@ -487,6 +490,7 @@ func TestCompactionMetrics(t *testing.T) {
 		MaxCompactionRange:      24 * time.Hour,
 		BlockRetention:          0,
 		CompactedBlockRetention: 0,
+		MaxInputBlocks:          DefaultMaxInputBlocks,
 	}, &mockSharder{}, &mockOverrides{})
 	require.NoError(t, err)
 
@@ -564,6 +568,7 @@ func TestCompactionIteratesThroughTenants(t *testing.T) {
 		MaxBlockBytes:           1024 * 1024 * 1024,
 		BlockRetention:          0,
 		CompactedBlockRetention: 0,
+		MaxInputBlocks:          DefaultMaxInputBlocks,
 	}, &mockSharder{}, &mockOverrides{})
 	require.NoError(t, err)
 
@@ -636,6 +641,7 @@ func testCompactionHonorsBlockStartEndTimes(t *testing.T, targetBlockVersion str
 		MaxCompactionRange:      24 * time.Hour,
 		BlockRetention:          0,
 		CompactedBlockRetention: 0,
+		MaxInputBlocks:          DefaultMaxInputBlocks,
 	}, &mockSharder{}, &mockOverrides{})
 	require.NoError(t, err)
 

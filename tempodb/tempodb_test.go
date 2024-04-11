@@ -81,6 +81,7 @@ func TestDB(t *testing.T) {
 		MaxCompactionRange:      time.Hour,
 		BlockRetention:          0,
 		CompactedBlockRetention: 0,
+		MaxInputBlocks:          DefaultMaxInputBlocks,
 	}, &mockSharder{}, &mockOverrides{})
 	require.NoError(t, err)
 
@@ -196,6 +197,7 @@ func TestBlockCleanup(t *testing.T) {
 		MaxCompactionRange:      time.Hour,
 		BlockRetention:          0,
 		CompactedBlockRetention: 0,
+		MaxInputBlocks:          DefaultMaxInputBlocks,
 	}, &mockSharder{}, &mockOverrides{})
 	require.NoError(t, err)
 
@@ -526,6 +528,7 @@ func TestSearchCompactedBlocks(t *testing.T) {
 		MaxCompactionRange:      time.Hour,
 		BlockRetention:          0,
 		CompactedBlockRetention: 0,
+		MaxInputBlocks:          DefaultMaxInputBlocks,
 	}, &mockSharder{}, &mockOverrides{})
 	require.NoError(t, err)
 

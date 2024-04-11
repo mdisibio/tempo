@@ -264,7 +264,7 @@ func (s *shardingBlockSelector) BlocksToCompact() common.CompactionRound {
 			for _, e := range chosen {
 				res.blocks = append(res.blocks, e.meta)
 			}
-			fmt.Println("Choosing group:", chosen[0].group, "num blocks", len(res.blocks))
+			// fmt.Println("Choosing group:", chosen[0].group, "num blocks", len(res.blocks))
 			return &res
 		}
 	}

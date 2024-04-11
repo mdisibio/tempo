@@ -1344,6 +1344,7 @@ func runCompleteBlockSearchTest(t *testing.T, blockVersion string, runners ...ru
 		MaxCompactionRange:      time.Hour,
 		BlockRetention:          0,
 		CompactedBlockRetention: 0,
+		MaxInputBlocks:          DefaultMaxInputBlocks,
 	}, &mockSharder{}, &mockOverrides{})
 	require.NoError(t, err)
 
@@ -1774,6 +1775,7 @@ func TestWALBlockGetMetrics(t *testing.T) {
 		MaxCompactionRange:      time.Hour,
 		BlockRetention:          0,
 		CompactedBlockRetention: 0,
+		MaxInputBlocks:          DefaultMaxInputBlocks,
 	}, &mockSharder{}, &mockOverrides{})
 	require.NoError(t, err)
 
@@ -1829,6 +1831,7 @@ func TestSearchForTagsAndTagValues(t *testing.T) {
 		MaxCompactionRange:      time.Hour,
 		BlockRetention:          0,
 		CompactedBlockRetention: 0,
+		MaxInputBlocks:          DefaultMaxInputBlocks,
 	}, &mockSharder{}, &mockOverrides{})
 	require.NoError(t, err)
 

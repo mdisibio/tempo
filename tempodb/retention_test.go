@@ -48,6 +48,7 @@ func TestRetention(t *testing.T) {
 		MaxCompactionRange:      time.Hour,
 		BlockRetention:          0,
 		CompactedBlockRetention: 0,
+		MaxInputBlocks:          DefaultMaxInputBlocks,
 	}, &mockSharder{}, &mockOverrides{})
 	require.NoError(t, err)
 
@@ -113,6 +114,7 @@ func TestRetentionUpdatesBlocklistImmediately(t *testing.T) {
 		MaxCompactionRange:      time.Hour,
 		BlockRetention:          0,
 		CompactedBlockRetention: 0,
+		MaxInputBlocks:          DefaultMaxInputBlocks,
 	}, &mockSharder{}, &mockOverrides{})
 	require.NoError(t, err)
 
@@ -182,6 +184,7 @@ func TestBlockRetentionOverride(t *testing.T) {
 		MaxCompactionRange:      time.Hour,
 		BlockRetention:          time.Hour,
 		CompactedBlockRetention: 0,
+		MaxInputBlocks:          DefaultMaxInputBlocks,
 	}, &mockSharder{}, overrides)
 	require.NoError(t, err)
 

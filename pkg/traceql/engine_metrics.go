@@ -365,6 +365,9 @@ func (e *Engine) CompileMetricsQueryRange(req *tempopb.QueryRangeRequest, dedupe
 	// This initializes all step buffers, counters, etc
 	metricsPipeline.init(req)
 
+	storageReq.TraceIDMin = req.TraceIDmin
+	storageReq.TraceIDMax = req.TraceIDmax
+
 	me := &MetricsEvalulator{
 		storageReq:        storageReq,
 		metricsPipeline:   metricsPipeline,

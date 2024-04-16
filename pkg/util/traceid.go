@@ -48,6 +48,9 @@ func TraceIDToHexString(byteID []byte) string {
 	id := hex.EncodeToString(byteID)
 	// remove leading zeros
 	id = strings.TrimLeft(id, "0")
+	if id == "" {
+		id = "0"
+	}
 	return id
 }
 

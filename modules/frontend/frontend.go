@@ -107,7 +107,7 @@ func New(cfg Config, next http.RoundTripper, o overrides.Interface, reader tempo
 
 	queryRangeMiddleware := MergeMiddlewares(
 		newMultiTenantUnsupportedMiddleware(cfg, logger),
-		newQueryRangeMiddleware(cfg, o, reader, logger), retryWare)
+		newQueryRangeMiddleware(cfg, o, reader, logger), cacheWare, retryWare)
 
 	traces := traceByIDMiddleware.Wrap(next)
 	search := newSearchHTTPHandler(cfg, searchPipeline, logger)

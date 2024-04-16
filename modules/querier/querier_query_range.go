@@ -1,6 +1,7 @@
 package querier
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"time"
@@ -21,8 +22,14 @@ import (
 )
 
 func (q *Querier) QueryRange(ctx context.Context, req *tempopb.QueryRangeRequest) (*tempopb.QueryRangeResponse, error) {
+	fmt.Printf("Querier performing job: %+v\n", req)
+
 	if req.QueryMode == QueryModeRecent {
 		return q.queryRangeRecent(ctx, req)
+	}
+
+	if req.BlockID != "" {
+		return q.queryBackendRF1(ctx, req)
 	}
 
 	// Backend requests go here
@@ -70,6 +77,13 @@ func (q *Querier) queryBackend(ctx context.Context, req *tempopb.QueryRangeReque
 	}
 	if req.ShardCount > 1 {
 		_, checkShard = traceidboundary.Funcs(req.ShardID, req.ShardCount)
+	} else if len(req.TraceIDmin) > 0 {
+		checkShard = func(min []byte, max []byte) bool {
+			if bytes.Compare(req.TraceIDmin, max) <= 0 && bytes.Compare(min, req.TraceIDmax) <= 0 {
+				return true
+			}
+			return false
+		}
 	}
 
 	// Get blocks that overlap this time range and shard
@@ -84,7 +98,7 @@ func (q *Querier) queryBackend(ctx context.Context, req *tempopb.QueryRangeReque
 	}
 
 	if len(matchingBlocks) == 0 {
-		return nil, nil
+		return &tempopb.QueryRangeResponse{}, nil
 	}
 
 	unsafe := q.limits.UnsafeQueryHints(tenantID)
@@ -201,4 +215,81 @@ func queryRangeTraceQLToProto(set traceql.SeriesSet, req *tempopb.QueryRangeRequ
 	}
 
 	return resp
+}
+
+func (q *Querier) queryBackendRF1(ctx context.Context, req *tempopb.QueryRangeRequest) (*tempopb.QueryRangeResponse, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	tenantID, err := user.ExtractOrgID(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get blocks that overlap this time range
+	metas := q.store.BlockMetas(tenantID)
+	var m *backend.BlockMeta
+	for _, mm := range metas {
+		if mm.BlockID.String() == req.BlockID {
+			m = mm
+			break
+		}
+	}
+	if m == nil {
+		return &tempopb.QueryRangeResponse{}, nil
+	}
+
+	span, ctx := opentracing.StartSpanFromContext(ctx, "querier.queryBackEndRF1", opentracing.Tags{
+		"block":      m.BlockID.String(),
+		"blockSize":  m.Size,
+		"startPage":  req.StartPage,
+		"totalPages": req.PagesToSearch,
+	})
+	defer span.Finish()
+
+	unsafe := q.limits.UnsafeQueryHints(tenantID)
+
+	expr, err := traceql.Parse(req.Query)
+	if err != nil {
+		return nil, err
+	}
+
+	timeOverlapCutoff := q.cfg.Metrics.TimeOverlapCutoff
+	if v, ok := expr.Hints.GetFloat(traceql.HintTimeOverlapCutoff, unsafe); ok && v >= 0 && v <= 1.0 {
+		timeOverlapCutoff = v
+	}
+
+	eval, err := traceql.NewEngine().CompileMetricsQueryRange(req, false, timeOverlapCutoff, unsafe)
+	if err != nil {
+		return nil, err
+	}
+
+	opts := common.DefaultSearchOptions()
+	opts.StartPage = int(req.StartPage)
+	opts.TotalPages = int(req.PagesToSearch)
+
+	f := traceql.NewSpansetFetcherWrapper(func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansResponse, error) {
+		return q.store.Fetch(ctx, m, req, opts)
+	})
+
+	// TODO handle error
+	err = eval.Do(ctx, f, uint64(m.StartTime.UnixNano()), uint64(m.EndTime.UnixNano()))
+	if err != nil {
+		return nil, err
+	}
+
+	res, err := eval.Results()
+	if err != nil {
+		return nil, err
+	}
+
+	inspectedBytes, spansTotal, _ := eval.Metrics()
+
+	return &tempopb.QueryRangeResponse{
+		Series: queryRangeTraceQLToProto(res, req),
+		Metrics: &tempopb.SearchMetrics{
+			InspectedBytes: inspectedBytes,
+			InspectedSpans: spansTotal,
+		},
+	}, nil
 }

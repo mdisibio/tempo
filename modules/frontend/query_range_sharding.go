@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/rand"
 	"net/http"
 	"sort"
 	"strconv"
@@ -29,6 +30,7 @@ import (
 	"github.com/grafana/tempo/pkg/tempopb"
 	common_v1 "github.com/grafana/tempo/pkg/tempopb/common/v1"
 	"github.com/grafana/tempo/pkg/traceql"
+	"github.com/grafana/tempo/pkg/util/traceidboundary"
 	"github.com/grafana/tempo/tempodb"
 	"github.com/grafana/tempo/tempodb/backend"
 )
@@ -128,7 +130,14 @@ func (s queryRangeSharder) RoundTrip(r *http.Request) (*http.Response, error) {
 		reqCh <- generatorReq
 	}
 
-	totalBlocks, totalBlockBytes := s.backendRequests(tenantID, *req, now, samplingRate, targetBytesPerRequest, interval, reqCh, stopCh)
+	var totalBlocks, totalBlockBytes int
+	if _, ok := expr.Hints.GetBool("rf1", true); ok {
+		totalBlocks, totalBlockBytes = s.backendRequestsRF1(tenantID, *req, now, samplingRate, targetBytesPerRequest, interval, reqCh, stopCh)
+	} else if _, ok := expr.Hints.GetBool("small", true); ok {
+		totalBlocks, totalBlockBytes = s.backendRequestsSmallShards(tenantID, *req, now, samplingRate, targetBytesPerRequest, interval, reqCh, stopCh)
+	} else {
+		totalBlocks, totalBlockBytes = s.backendRequests(tenantID, *req, now, samplingRate, targetBytesPerRequest, interval, reqCh, stopCh)
+	}
 
 	var (
 		wg          = boundedwaitgroup.New(uint(s.cfg.ConcurrentRequests))
@@ -156,6 +165,11 @@ func (s queryRangeSharder) RoundTrip(r *http.Request) (*http.Response, error) {
 			defer wg.Done()
 
 			innerR := s.toUpstreamRequest(subCtx, job.req, r, tenantID)
+
+			if job.cacheKey != "" {
+				innerR = pipeline.AddCacheKey(job.cacheKey, innerR)
+			}
+
 			resp, err := s.next.RoundTrip(innerR)
 			if err != nil {
 				// context cancelled error happens when we exit early.
@@ -603,5 +617,182 @@ type PromResult struct {
 type queryRangeJob struct {
 	req          tempopb.QueryRangeRequest
 	err          error
+	cacheKey     string
 	samplingRate float64
+}
+
+func (s *queryRangeSharder) backendRequestsRF1(tenantID string, searchReq tempopb.QueryRangeRequest, now time.Time, samplingRate float64, targetBytesPerRequest int, interval time.Duration, reqCh chan *queryRangeJob, stopCh <-chan struct{}) (totalBlocks, totalBlockBytes int) {
+	// request without start or end, search only in generator
+	if searchReq.Start == 0 || searchReq.End == 0 {
+		close(reqCh)
+		return
+	}
+
+	// Make a copy and limit to backend time range.
+	backendReq := searchReq
+	backendReq.Start, backendReq.End = s.backendRange(now, backendReq.Start, backendReq.End, s.cfg.QueryBackendAfter)
+	alignTimeRange(&backendReq)
+
+	// If empty window then no need to search backend
+	if backendReq.Start == backendReq.End {
+		close(reqCh)
+		return
+	}
+
+	// Blocks within overall time range. This is just for instrumentation, more precise time
+	// range is checked for each window.
+	blocks := s.blockMetas(int64(backendReq.Start), int64(backendReq.End), tenantID)
+	if len(blocks) == 0 {
+		// no need to search backend
+		close(reqCh)
+		return
+	}
+
+	totalBlocks = len(blocks)
+	for _, b := range blocks {
+		totalBlockBytes += int(b.Size)
+	}
+
+	go func() {
+		s.buildBackendRequestsRF1(tenantID, blocks, backendReq, samplingRate, targetBytesPerRequest, interval, reqCh, stopCh)
+	}()
+
+	return
+}
+
+func (s *queryRangeSharder) buildBackendRequestsRF1(tenantID string, metas []*backend.BlockMeta, searchReq tempopb.QueryRangeRequest, samplingRate float64, targetBytesPerRequest int, interval time.Duration, reqCh chan *queryRangeJob, stopCh <-chan struct{}) {
+	defer close(reqCh)
+
+	queryHash := hashForTraceQLQuery(searchReq.Query)
+
+	for _, m := range metas {
+		pages := pagesPerRequest(m, targetBytesPerRequest)
+		if pages == 0 {
+			continue
+		}
+
+		blockID := m.BlockID.String()
+		for startPage := 0; startPage < int(m.TotalRecords); startPage += pages {
+
+			if samplingRate < 1.0 && rand.Float64() > samplingRate {
+				continue
+			}
+
+			subR := searchReq
+			subR.PagesToSearch = uint32(pages)
+			subR.StartPage = uint32(startPage)
+			subR.BlockID = blockID
+
+			start := time.Unix(0, int64(searchReq.Start))
+			end := time.Unix(0, int64(searchReq.End))
+
+			key := cacheKey("qrj", tenantID, queryHash, start.Unix(), end.Unix(), m, startPage, pages)
+
+			select {
+			case reqCh <- &queryRangeJob{req: subR, samplingRate: samplingRate, cacheKey: key}:
+			case <-stopCh:
+				return
+			}
+		}
+	}
+}
+
+func (s *queryRangeSharder) backendRequestsSmallShards(tenantID string, searchReq tempopb.QueryRangeRequest, now time.Time, samplingRate float64, targetBytesPerRequest int, interval time.Duration, reqCh chan *queryRangeJob, stopCh <-chan struct{}) (totalBlocks, totalBlockBytes int) {
+	// request without start or end, search only in generator
+	if searchReq.Start == 0 || searchReq.End == 0 {
+		close(reqCh)
+		return
+	}
+
+	// Make a copy and limit to backend time range.
+	backendReq := searchReq
+	backendReq.Start, backendReq.End = s.backendRange(now, backendReq.Start, backendReq.End, s.cfg.QueryBackendAfter)
+	alignTimeRange(&backendReq)
+
+	// If empty window then no need to search backend
+	if backendReq.Start == backendReq.End {
+		close(reqCh)
+		return
+	}
+
+	// Blocks within overall time range. This is just for instrumentation, more precise time
+	// range is checked for each window.
+	blocks := s.blockMetas(int64(backendReq.Start), int64(backendReq.End), tenantID)
+	if len(blocks) == 0 {
+		// no need to search backend
+		close(reqCh)
+		return
+	}
+
+	totalBlocks = len(blocks)
+	for _, b := range blocks {
+		totalBlockBytes += int(b.Size)
+	}
+
+	go func() {
+		s.buildBackendRequestsSmallShards(tenantID, blocks, backendReq, samplingRate, targetBytesPerRequest, interval, reqCh, stopCh)
+	}()
+
+	return
+}
+
+func (s *queryRangeSharder) buildBackendRequestsSmallShards(tenantID string, metas []*backend.BlockMeta, searchReq tempopb.QueryRangeRequest, samplingRate float64, targetBytesPerRequest int, interval time.Duration, reqCh chan *queryRangeJob, stopCh <-chan struct{}) {
+	defer close(reqCh)
+
+	var (
+		start          = searchReq.Start
+		end            = searchReq.End
+		timeWindowSize = uint64(interval.Nanoseconds())
+	)
+
+	for start < end {
+
+		thisStart := start
+		thisEnd := start + timeWindowSize
+		if thisEnd > end {
+			thisEnd = end
+		}
+
+		blocks := s.blockMetas(int64(thisStart), int64(thisEnd), tenantID)
+		if len(blocks) == 0 {
+			start = thisEnd
+			continue
+		}
+
+		totalBlockSize := uint64(0)
+		for _, b := range blocks {
+			totalBlockSize += b.Size
+		}
+
+		shards := uint32(math.Ceil(float64(totalBlockSize) / float64(targetBytesPerRequest)))
+
+		for i := uint32(1); i <= shards; i++ {
+
+			pairs, _ := traceidboundary.Pairs(i, shards)
+
+			for _, p := range pairs {
+				shardR := searchReq
+				shardR.Start = thisStart
+				shardR.End = thisEnd
+				shardR.TraceIDmin = p.Min
+				shardR.TraceIDmax = p.Max
+
+				/*if samplingRate != 1.0 {
+					shardR.ShardID *= uint32(1.0 / samplingRate)
+					shardR.ShardCount *= uint32(1.0 / samplingRate)
+
+					// Set final sampling rate after integer rounding
+					samplingRate = float64(shards) / float64(shardR.ShardCount)
+				}*/
+
+				select {
+				case reqCh <- &queryRangeJob{req: shardR, samplingRate: samplingRate}:
+				case <-stopCh:
+					return
+				}
+			}
+		}
+
+		start = thisEnd
+	}
 }

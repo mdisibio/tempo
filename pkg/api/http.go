@@ -353,6 +353,19 @@ func ParseQueryRangeRequest(r *http.Request) (*tempopb.QueryRangeRequest, error)
 	if shard, err := strconv.Atoi(r.Form.Get(urlParamShard)); err == nil {
 		req.ShardID = uint32(shard)
 	}
+	if pages, err := strconv.Atoi(r.Form.Get(urlParamPagesToSearch)); err == nil {
+		req.PagesToSearch = uint32(pages)
+	}
+	if start, err := strconv.Atoi(r.Form.Get(urlParamStartPage)); err == nil {
+		req.StartPage = uint32(start)
+	}
+	req.BlockID = r.Form.Get(urlParamBlockID)
+	if min := r.Form.Get("traceIDMin"); len(min) > 0 {
+		req.TraceIDmin, _ = util.HexStringToTraceID(min)
+	}
+	if max := r.Form.Get("traceIDMax"); len(max) > 0 {
+		req.TraceIDmax, _ = util.HexStringToTraceID(max)
+	}
 
 	return req, nil
 }
@@ -375,6 +388,15 @@ func BuildQueryRangeRequest(req *http.Request, searchReq *tempopb.QueryRangeRequ
 	q.Set(urlParamShard, strconv.FormatUint(uint64(searchReq.ShardID), 10))
 	q.Set(urlParamShardCount, strconv.FormatUint(uint64(searchReq.ShardCount), 10))
 	q.Set(QueryModeKey, searchReq.QueryMode)
+	q.Set(urlParamBlockID, searchReq.BlockID)
+	q.Set(urlParamStartPage, strconv.FormatUint(uint64(searchReq.StartPage), 10))
+	q.Set(urlParamPagesToSearch, strconv.FormatUint(uint64(searchReq.PagesToSearch), 10))
+	if len(searchReq.TraceIDmin) > 0 {
+		q.Set("traceIDMin", util.TraceIDToHexString(searchReq.TraceIDmin))
+	}
+	if len(searchReq.TraceIDmax) > 0 {
+		q.Set("traceIDMax", util.TraceIDToHexString(searchReq.TraceIDmax))
+	}
 
 	if len(searchReq.Query) > 0 {
 		q.Set(urlParamQuery, searchReq.Query)

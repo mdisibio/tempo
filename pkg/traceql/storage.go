@@ -74,6 +74,9 @@ type FetchSpansRequest struct {
 	// TODO: extend this to an arbitrary number of passes
 	SecondPass           SecondPassFn
 	SecondPassConditions []Condition
+
+	TraceIDMin []byte
+	TraceIDMax []byte
 }
 
 func (f *FetchSpansRequest) appendCondition(c ...Condition) {

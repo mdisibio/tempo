@@ -118,7 +118,7 @@ root:
     spansetPipeline                             { yylex.(*lexer).expr = newRootExpr($1) }
   | spansetPipelineExpression                   { yylex.(*lexer).expr = newRootExpr($1) }
   | scalarPipelineExpressionFilter              { yylex.(*lexer).expr = newRootExpr($1) } 
-  | spansetPipeline PIPE metricsAggregation     { yylex.(*lexer).expr = newRootExprWithMetrics($1, $3) }
+  | metricsPipeline                             { yylex.(*lexer).expr = $1 }
   | root hints                                  { yylex.(*lexer).expr.withHints($2) }
   ;
 
@@ -162,6 +162,10 @@ spansetPipeline:
   | spansetPipeline PIPE selectOperation       { $$ = $1.addItem($3)  }
   ;
 
+metricsPipeline:
+    spansetPipeline PIPE metricsAggregation     { $$ = newRootExprWithMetrics($1, $3) } 
+  | metricsPipeline GT numeric                  {}
+
 groupOperation:
     BY OPEN_PARENS fieldExpression CLOSE_PARENS { $$ = newGroupOperation($3) }
   ;
@@ -185,12 +189,14 @@ attributeList:
   | attributeList COMMA attribute { $$ = append($1, $3) }
   ;
 
+numeric:
+  FLOAT      { $$ = $1 }
+  | INTEGER  { $$ = float64($1) }
+
 // Comma-separated list of numeric values. Casts all to floats
 numericList:
-  FLOAT                       { $$ = []float64{$1} }
-  | INTEGER                   { $$ = []float64{float64($1)}}
-  | numericList COMMA FLOAT   { $$ = append($1, $3) }
-  | numericList COMMA INTEGER { $$ = append($1, float64($3))}
+  numeric                     { $$ = []float64{float64($1)}}
+  | numericList COMMA numeric { $$ = append($1, $3) }
   ;
 
 spansetExpression: // shares the same operators as scalarPipelineExpression. split out for readability

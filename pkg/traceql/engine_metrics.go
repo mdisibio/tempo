@@ -955,6 +955,40 @@ func (h *HistogramAggregator) Results() SeriesSet {
 	return results
 }
 
+func Bucketize(a Attribute) func(Span) (Static, bool) {
+	switch a {
+	case IntrinsicDurationAttribute:
+		// Optimal implementation for duration attribute
+		return func(s Span) (Static, bool) {
+			d := s.DurationNanos()
+			if d < 2 {
+				return Static{}, false
+			}
+			// Bucket is in seconds
+			return NewStaticFloat(Log2Bucketize(d) / float64(time.Second)), true
+		}
+	default:
+		// Basic implementation for all other attributes
+		return func(s Span) (Static, bool) {
+			v, ok := s.AttributeFor(a)
+			if !ok {
+				return Static{}, false
+			}
+
+			// TODO(mdisibio) - Add support for floats, we need to map them into buckets.
+			// Because of the range of floats, we need a native histogram approach.
+			if v.Type != TypeInt {
+				return Static{}, false
+			}
+
+			if v.N < 2 {
+				return Static{}, false
+			}
+			return NewStaticFloat(Log2Bucketize(uint64(v.N))), true
+		}
+	}
+}
+
 // Log2Bucketize rounds the given value to the next powers-of-two bucket.
 func Log2Bucketize(v uint64) float64 {
 	if v < 2 {

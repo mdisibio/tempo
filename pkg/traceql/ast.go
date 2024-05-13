@@ -23,6 +23,50 @@ type metricsFirstStageElement interface {
 	result() SeriesSet
 }
 
+type MetricsPipeline interface {
+	Element
+	extractConditions(request *FetchSpansRequest)
+	observe(SeriesSet)
+	result() SeriesSet
+}
+
+type metricsBinaryOperation struct {
+	Op  Operator
+	LHS MetricsPipeline
+	RHS MetricsPipeline
+}
+
+var _ MetricsPipeline = (*metricsBinaryOperation)(nil)
+
+func (m metricsBinaryOperation) extractConditions(req *FetchSpansRequest) {
+	m.LHS.extractConditions(req)
+	m.RHS.extractConditions(req)
+}
+
+func (m metricsBinaryOperation) validate() error {
+	switch m.Op {
+	case OpDiv:
+		return nil
+	default:
+		return newUnsupportedError("metrics binop not supported")
+	}
+}
+
+func (m metricsBinaryOperation) String() string {
+	return "metricsBinOp"
+}
+
+func (m metricsBinaryOperation) observe(ss SeriesSet) {
+	m.LHS.observe(ss)
+	m.RHS.observe(ss)
+}
+
+func (m metricsBinaryOperation) result() SeriesSet {
+	lhs := m.LHS.result()
+	rhs := m.RHS.result()
+	return nil
+}
+
 type pipelineElement interface {
 	Element
 	extractConditions(request *FetchSpansRequest)
@@ -37,6 +81,11 @@ type RootExpr struct {
 	Pipeline        Pipeline
 	MetricsPipeline metricsFirstStageElement
 	Hints           *Hints
+}
+
+type singleMetricsPipeline struct {
+	Pipeline     Pipeline
+	MetricsFirst metricsFirstStageElement
 }
 
 func newRootExpr(e pipelineElement) *RootExpr {
@@ -837,83 +886,11 @@ func (a *MetricsAggregate) init(q *tempopb.QueryRangeRequest, mode AggregateMode
 	case metricsAggregateRate:
 		innerAgg = func() VectorAggregator { return NewRateAggregator(1.0 / time.Duration(q.Step).Seconds()) }
 
-	case metricsAggregateHistogramOverTime:
-		// Histograms are implemented as count_over_time() by(2^log2(attr)) for now
-		// This is very similar to quantile_over_time except the bucket values are the true
-		// underlying value in scale, i.e. a duration of 500ms will be in __bucket==0.512s
-		// The difference is that quantile_over_time has to calculate the final quantiles
-		// so in that case the log2 bucket number is more useful.  We can clean it up later
-		// when updating quantiles to be smarter and more customizable range of buckets.
+	case metricsAggregateQuantileOverTime, metricsAggregateHistogramOverTime:
+		// Quantile and Histogram raw is implemented as count_over_time() by(2^log2(attr))
 		innerAgg = func() VectorAggregator { return NewCountOverTimeAggregator() }
 		byFuncLabel = internalLabelBucket
-		switch a.attr {
-		case IntrinsicDurationAttribute:
-			// Optimal implementation for duration attribute
-			byFunc = func(s Span) (Static, bool) {
-				d := s.DurationNanos()
-				if d < 2 {
-					return Static{}, false
-				}
-				// Bucket is log2(nanos) converted to float seconds
-				return NewStaticFloat(Log2Bucketize(d) / float64(time.Second)), true
-			}
-		default:
-			// Basic implementation for all other attributes
-			byFunc = func(s Span) (Static, bool) {
-				v, ok := s.AttributeFor(a.attr)
-				if !ok {
-					return Static{}, false
-				}
-
-				// TODO(mdisibio) - Add support for floats, we need to map them into buckets.
-				// Because of the range of floats, we need a native histogram approach.
-				if v.Type != TypeInt {
-					return Static{}, false
-				}
-
-				if v.N < 2 {
-					return Static{}, false
-				}
-				// Bucket is the value rounded up to the nearest power of 2
-				return NewStaticFloat(Log2Bucketize(uint64(v.N))), true
-			}
-		}
-
-	case metricsAggregateQuantileOverTime:
-		// Quantiles are implemented as count_over_time() by(log2(attr)) for now
-		innerAgg = func() VectorAggregator { return NewCountOverTimeAggregator() }
-		byFuncLabel = internalLabelBucket
-		switch a.attr {
-		case IntrinsicDurationAttribute:
-			// Optimal implementation for duration attribute
-			byFunc = func(s Span) (Static, bool) {
-				d := s.DurationNanos()
-				if d < 2 {
-					return Static{}, false
-				}
-				// Bucket is in seconds
-				return NewStaticFloat(Log2Bucketize(d) / float64(time.Second)), true
-			}
-		default:
-			// Basic implementation for all other attributes
-			byFunc = func(s Span) (Static, bool) {
-				v, ok := s.AttributeFor(a.attr)
-				if !ok {
-					return Static{}, false
-				}
-
-				// TODO(mdisibio) - Add support for floats, we need to map them into buckets.
-				// Because of the range of floats, we need a native histogram approach.
-				if v.Type != TypeInt {
-					return Static{}, false
-				}
-
-				if v.N < 2 {
-					return Static{}, false
-				}
-				return NewStaticFloat(Log2Bucketize(uint64(v.N))), true
-			}
-		}
+		byFunc = Bucketize(a.attr)
 	}
 
 	a.agg = NewGroupingAggregator(a.op.String(), func() RangeAggregator {

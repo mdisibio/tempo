@@ -1,17 +1,6 @@
 // Copyright (c) 2019 The Jaeger Authors.
 // Copyright (c) 2018 Uber Technologies, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package model
 
@@ -93,17 +82,17 @@ func TraceIDFromBytes(data []byte) (TraceID, error) {
 }
 
 // MarshalText is called by encoding/json, which we do not want people to use.
-func (t TraceID) MarshalText() ([]byte, error) {
+func (TraceID) MarshalText() ([]byte, error) {
 	return nil, fmt.Errorf("unsupported method TraceID.MarshalText; please use github.com/gogo/protobuf/jsonpb for marshalling")
 }
 
 // UnmarshalText is called by encoding/json, which we do not want people to use.
-func (t *TraceID) UnmarshalText(text []byte) error {
+func (*TraceID) UnmarshalText([]byte /* text */) error {
 	return fmt.Errorf("unsupported method TraceID.UnmarshalText; please use github.com/gogo/protobuf/jsonpb for marshalling")
 }
 
 // Size returns the size of this datum in protobuf. It is always 16 bytes.
-func (t *TraceID) Size() int {
+func (*TraceID) Size() int {
 	return 16
 }
 
@@ -187,17 +176,17 @@ func SpanIDFromBytes(data []byte) (SpanID, error) {
 }
 
 // MarshalText is called by encoding/json, which we do not want people to use.
-func (s SpanID) MarshalText() ([]byte, error) {
+func (SpanID) MarshalText() ([]byte, error) {
 	return nil, fmt.Errorf("unsupported method SpanID.MarshalText; please use github.com/gogo/protobuf/jsonpb for marshalling")
 }
 
 // UnmarshalText is called by encoding/json, which we do not want people to use.
-func (s *SpanID) UnmarshalText(text []byte) error {
+func (*SpanID) UnmarshalText([]byte /* text */) error {
 	return fmt.Errorf("unsupported method SpanID.UnmarshalText; please use github.com/gogo/protobuf/jsonpb for marshalling")
 }
 
 // Size returns the size of this datum in protobuf. It is always 8 bytes.
-func (s *SpanID) Size() int {
+func (*SpanID) Size() int {
 	return 8
 }
 

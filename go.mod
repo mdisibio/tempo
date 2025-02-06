@@ -46,7 +46,7 @@ require (
 	github.com/prometheus/prometheus v0.54.1
 	github.com/prometheus/statsd_exporter v0.26.1
 	github.com/segmentio/fasthash v1.0.3
-	github.com/sony/gobreaker v0.4.1
+	github.com/sony/gobreaker v1.0.0
 	github.com/spf13/viper v1.19.0
 	github.com/stretchr/testify v1.10.0
 	github.com/uber-go/atomic v1.4.0

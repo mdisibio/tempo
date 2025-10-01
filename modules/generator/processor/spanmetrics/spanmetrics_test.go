@@ -8,6 +8,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -23,6 +26,8 @@ import (
 	resource_v1 "github.com/grafana/tempo/pkg/tempopb/resource/v1"
 	trace_v1 "github.com/grafana/tempo/pkg/tempopb/trace/v1"
 	"github.com/grafana/tempo/pkg/util/test"
+
+	"github.com/grafana/tempo/pkg/drain"
 )
 
 var metricSpansDiscarded = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -1681,4 +1686,324 @@ func TestTargetInfoSkipsLabelsStartingWithNumber(t *testing.T) {
 	})
 
 	assert.Equal(t, 1.0, testRegistry.Query("traces_target_info", lbls))
+}
+
+func TestDrain(t *testing.T) {
+	strs := []string{
+		"🌈🌈 Test multi-byte characters 🌈🌈 1",
+		"🌈🌈 Test multi-byte characters 🌈🌈 2",
+		"Run zizmor from current branch (self test) / Generate and upload zizmor results 🌈",
+		"document/d/CfMkAGbE_aivhFydEpaRafPuGWbmHfG/edit",
+		"document/d/C2fMkAGb3E_aivhFyd5EpaRafP123uGWbmHfG/edit",
+		"document/d/123/edit",
+		"/user/123",
+		"/user/456",
+		"/user/123/basket/1",
+		"/user/456/basket/3",
+		"shard01",
+		"shard03",
+		"/*+ shard01_standby",
+		"/*+ shard03_standby",
+		"httpclient/k8s_client",
+		"httpclient/k8s_manager",
+		"GET /products?id=123456",
+		"GET /products?id=123457",
+		"POST /v1/tests/286475",
+		"POST /v1/tests/286476",
+		"POST /v1/tests/286477",
+		"POST /v1/tokens",
+		"POST /v1/traces",
+		"POST /v2/metrics/286475",
+		"POST /v2/metrics/286476",
+		"POST /v2/metrics/286477",
+		"POST /v2/metrics/286478",
+		"POST /v2/metrics/:id",
+		"s3.Append",
+		"s3.Read",
+		"s3.ReadRange",
+		"s3.ReadVersioned",
+		"s3.Write",
+		"k6.Resume",
+		"k6.RunSetup",
+		"k6.SetSetupData",
+		"k6.Stop",
+		"tempopb.Querier/SearchTagValuesV2",
+		"tempopb.Querier/SearchTagValuesV3",
+		"tempopb.Querier/SearchTagsV2",
+		"versionFallbackK8sHandler.Get",
+		"walBlock.SearchTagsV2",
+	}
+
+	// Or load custom data
+	// strs := tenant1Strings
+	// strs := tenant2Strings
+	// strs := opsNames
+	// strs := dev01Names
+
+	now := time.Now().UnixNano()
+
+	hexWithAtLeastOneDigit := func(token string) bool {
+		atLeastOneDigit := false
+		for _, c := range token {
+			if unicode.IsNumber(c) {
+				atLeastOneDigit = true
+				continue
+			}
+			if unicode.Is(unicode.Hex_Digit, c) || unicode.IsPunct(c) {
+				continue
+			}
+			// Non-hex, non-punct found.
+			return false
+		}
+		// All hex-like or guid-like values
+		// But still require at least one digit.
+		return atLeastOneDigit
+	}
+
+	significantNumbers := func(token string) bool {
+		numberCount := 0
+		for _, c := range token {
+			if unicode.IsNumber(c) {
+				numberCount++
+			}
+		}
+		return numberCount > max(len(token)/4, 1)
+	}
+
+	wildcardable := func(token string) bool {
+		return hexWithAtLeastOneDigit(token) || significantNumbers(token)
+	}
+
+	cfg := drain.DefaultConfig()
+	cfg.MinTokens = 3 // const + number suffix + <END>
+	cfg.TokenIsLikelyData = wildcardable
+	cfg.Tokenizer = &PunctuationAndSuffixAwareTokenizer{}
+	cfg.MaxClusters = 100000
+	cfg.MaxChildren = 1000
+	cfg.LogClusterDepth = 100
+
+	d := drain.New("", cfg, nil, "", nil)
+
+	// First training
+	for _, str := range strs {
+		d.Train(str, now)
+	}
+
+	elgible := 0
+	eliminated := 0
+	same := 0
+
+	for _, str := range strs {
+		if !hasNumbers(str) {
+			continue
+		}
+
+		elgible++
+
+		c := d.Train(str, now)
+		if c == nil {
+			same++
+			fmt.Println("None  :", str)
+			continue
+		}
+
+		text := c.String()
+
+		if text == str {
+			same++
+			fmt.Println("Same  :", str)
+			continue
+		}
+
+		fmt.Println("Change:", str)
+		fmt.Println("      :", text)
+		eliminated++
+	}
+
+	fmt.Printf("Total: %d, Elgible: %d, Eliminated: %d, Same: %d\n", len(strs), elgible, eliminated, same)
+}
+
+func hasNumbers(s string) bool {
+	for _, c := range s {
+		if unicode.IsNumber(c) {
+			return true
+		}
+	}
+	return false
+}
+
+func BenchmarkDrain(b *testing.B) {
+	strs := []string{
+		"🌈🌈 Test multi-byte characters 🌈🌈 1",
+		"🌈🌈 Test multi-byte characters 🌈🌈 2",
+		"Run zizmor from current branch (self test) / Generate and upload zizmor results 🌈",
+		"document/d/CfMkAGbE_aivhFydEpaRafPuGWbmHfG/edit",
+		"document/d/C2fMkAGb3E_aivhFyd5EpaRafP123uGWbmHfG/edit",
+		"document/d/123/edit",
+		"/user/123",
+		"/user/456",
+		"/user/123/basket/1",
+		"/user/456/basket/3",
+		"shard01",
+		"shard03",
+		"/*+ shard01_standby",
+		"/*+ shard03_standby",
+		"httpclient/k8s_client",
+		"httpclient/k8s_manager",
+		"GET /products?id=123456",
+		"GET /products?id=123457",
+		"POST /v1/tests/286475",
+		"POST /v1/tests/286476",
+		"POST /v1/tests/286477",
+		"POST /v1/tokens",
+		"POST /v1/traces",
+		"POST /v2/metrics/286475",
+		"POST /v2/metrics/286476",
+		"POST /v2/metrics/286477",
+		"POST /v2/metrics/286478",
+		"POST /v2/metrics/:id",
+		"s3.Append",
+		"s3.Read",
+		"s3.ReadRange",
+		"s3.ReadVersioned",
+		"s3.Write",
+		"k6.Resume",
+		"k6.RunSetup",
+		"k6.SetSetupData",
+		"k6.Stop",
+		"tempopb.Querier/SearchTagValuesV2",
+		"tempopb.Querier/SearchTagValuesV3",
+		"tempopb.Querier/SearchTagsV2",
+		"versionFallbackK8sHandler.Get",
+		"walBlock.SearchTagsV2",
+	}
+
+	hexWithAtLeastOneDigit := func(token string) bool {
+		atLeastOneDigit := false
+		for _, c := range token {
+			if unicode.IsNumber(c) {
+				atLeastOneDigit = true
+				continue
+			}
+			if unicode.Is(unicode.Hex_Digit, c) || unicode.IsPunct(c) {
+				continue
+			}
+			// Non-hex, non-punct, so preserve this value.
+			return false
+		}
+		// All hex-like or guid-like values
+		// But still require at least one digit.
+		return atLeastOneDigit
+	}
+
+	significantNumbers := func(token string) bool {
+		numberCount := 0
+		for _, c := range token {
+			if unicode.IsNumber(c) {
+				numberCount++
+			}
+		}
+		return numberCount > len(token)/4
+	}
+
+	wildcardable := func(token string) bool {
+		return hexWithAtLeastOneDigit(token) || significantNumbers(token)
+	}
+
+	now := time.Now().UnixNano()
+
+	cfg := drain.DefaultConfig()
+	cfg.ParamString = "<*>"
+	cfg.MaxClusters = 100000
+	cfg.MaxChildren = 1000
+	cfg.LogClusterDepth = 1000
+	cfg.TokenIsLikelyData = wildcardable
+	cfg.Tokenizer = &PunctuationAndSuffixAwareTokenizer{}
+
+	d := drain.New("", cfg, nil, "", nil)
+
+	for b.Loop() {
+		for _, str := range strs {
+			c := d.Train(str, now)
+			if c == nil {
+				continue
+			}
+			c.String()
+		}
+	}
+}
+
+type PunctuationAndSuffixAwareTokenizer struct{}
+
+var _ drain.LineTokenizer = (*PunctuationAndSuffixAwareTokenizer)(nil)
+
+func (t *PunctuationAndSuffixAwareTokenizer) splitSuffix(tokens []string, token string) []string {
+	firstNumberFromLeft := -1
+	lastNumberFromRight := -1
+	for i, c := range token {
+		if unicode.IsNumber(c) {
+			firstNumberFromLeft = i
+			break
+		}
+	}
+	for i := len(token) - 1; i >= 0; i-- {
+		if unicode.IsNumber(rune(token[i])) {
+			lastNumberFromRight = i
+		} else {
+			break
+		}
+	}
+	if firstNumberFromLeft > 0 && lastNumberFromRight > 0 && firstNumberFromLeft == lastNumberFromRight {
+		// Single substring of consecutive numbers detected at the end, break it in pieces.
+		tokens = append(tokens, token[:firstNumberFromLeft])
+		tokens = append(tokens, token[firstNumberFromLeft:])
+	} else {
+		// If numbers mix throughout, or the string is entirely numbers, then leave as one piece and substitute using normal logic.
+		tokens = append(tokens, token)
+	}
+	return tokens
+}
+
+func (t *PunctuationAndSuffixAwareTokenizer) Tokenize(str string, tokens []string, state interface{}, _ *prometheus.CounterVec) ([]string, interface{}) {
+	tokens = tokens[:0]
+	var curr string
+	currStart := 0
+	for i, c := range str {
+		switch c {
+		case ' ', '/', '.', '_', '@':
+			// Encountered a separator.
+			// Split and append current buffer if needed.
+			if len(curr) > 0 {
+				tokens = t.splitSuffix(tokens, curr)
+			}
+			// Add the separator
+			tokens = append(tokens, str[i:i+utf8.RuneLen(c)])
+			// Reset the buffer.
+			curr = ""
+			currStart = i + 1
+		default:
+			// Keep collecting into the current buffer.
+			// RuneLen to account for multibyte characters.
+			curr = str[currStart : i+utf8.RuneLen(c)]
+		}
+	}
+	if len(curr) > 0 {
+		tokens = t.splitSuffix(tokens, curr)
+	}
+
+	// Always add leaf token at the end that prevents turning the real last
+	// leaf into a wildcard unnecessarily.
+	tokens = append(tokens, "<END>")
+	return tokens, nil
+}
+
+func (t *PunctuationAndSuffixAwareTokenizer) Clone(tokens []string, state interface{}) ([]string, interface{}) {
+	res := make([]string, len(tokens))
+	copy(res, tokens)
+	return res, nil
+}
+
+func (t *PunctuationAndSuffixAwareTokenizer) Join(tokens []string, state interface{}) string {
+	// Last token is always <END> so we don't need to include it.
+	return strings.Join(tokens[0:len(tokens)-1], "")
 }

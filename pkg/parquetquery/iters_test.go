@@ -403,3 +403,25 @@ func BenchmarkIteratorResultAppend(b *testing.B) {
 		})
 	}
 }
+
+func BenchmarkNextOld(b *testing.B) {
+	rn := RowNumber{1, 2, 3, 4, 5, 6, 7, 8}
+	for b.Loop() {
+		rn.NextOld(4, 5, 6)
+	}
+}
+
+func BenchmarkNext(b *testing.B) {
+	b.Run("4/5/6/", func(b *testing.B) {
+		rn := RowNumber{1, 2, 3, 4, 5, 6, 7, 8}
+		for b.Loop() {
+			rn.Next(4, 5, 6)
+		}
+	})
+	b.Run("1/2/3", func(b *testing.B) {
+		rn := RowNumber{1, 2, 3, 4, 5, 6, 7, 8}
+		for b.Loop() {
+			rn.Next(1, 2, 3)
+		}
+	})
+}

@@ -114,6 +114,23 @@ func (t *RowNumber) Valid() bool {
 	return t[0] >= 0
 }
 
+var rnNextBits [8][8]RowNumber
+
+func init() {
+	for r := 0; r < 8; r++ {
+		for d := 0; d < 8; d++ {
+			if r <= d {
+				for i := r + 1; i <= d; i++ {
+					rnNextBits[r][d][i] = 0
+				}
+				for i := d + 1; i < 8; i++ {
+					rnNextBits[r][d][i] = -1
+				}
+			}
+		}
+	}
+}
+
 // Next increments and resets the row numbers according
 // to the given repetition and definition levels. Examples
 // from the Dremel whitepaper:
@@ -127,7 +144,7 @@ func (t *RowNumber) Valid() bool {
 // | null   | 1 | 1 | {  0,  1, -1, -1 }
 // | gb     | 1 | 3 | {  0,  2,  0,  0 }
 // | null   | 0 | 1 | {  1,  0, -1, -1 }
-func (t *RowNumber) Next(repetitionLevel, definitionLevel, maxDefinitionLevel int) {
+func (t *RowNumber) NextOld(repetitionLevel, definitionLevel, maxDefinitionLevel int) {
 	t[repetitionLevel]++
 
 	// New children up through the definition level
@@ -138,6 +155,13 @@ func (t *RowNumber) Next(repetitionLevel, definitionLevel, maxDefinitionLevel in
 	// // Children past the definition level are undefined
 	for i := definitionLevel + 1; i < len(t) && i <= maxDefinitionLevel; i++ {
 		t[i] = -1
+	}
+}
+
+func (t *RowNumber) Next(repetitionLevel, definitionLevel, maxDefinitionLevel int) {
+	t[repetitionLevel]++
+	for i := repetitionLevel + 1; i < len(t) && i <= maxDefinitionLevel; i++ {
+		t[i] = rnNextBits[repetitionLevel][definitionLevel][i]
 	}
 }
 

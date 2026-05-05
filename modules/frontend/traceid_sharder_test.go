@@ -243,48 +243,48 @@ func TestBlocksPerShardTimeRangeFiltering(t *testing.T) {
 // capped so that total jobs never exceed maxOutstandingPerTenant.
 func TestBlocksPerShardRespectsMaxOutstanding(t *testing.T) {
 	tests := []struct {
-		name            string
-		numBlocks       int
-		blocksPerShard  uint
+		name                  string
+		numBlocks             int
+		blocksPerShard        uint
 		maxDynamicBlockShards int // 0 = uncapped
-		externalEnabled bool
-		wantTotalShards int
+		externalEnabled       bool
+		wantTotalShards       int
 	}{
 		{
-			name:            "cap not reached",
-			numBlocks:       10,
-			blocksPerShard:  1,
+			name:                  "cap not reached",
+			numBlocks:             10,
+			blocksPerShard:        1,
 			maxDynamicBlockShards: 19, // maxOutstandingPerTenant=20 minus 1 ingester
-			wantTotalShards: 11, // 1 ingester + 10 block shards
+			wantTotalShards:       11, // 1 ingester + 10 block shards
 		},
 		{
-			name:            "cap exactly reached",
-			numBlocks:       10,
-			blocksPerShard:  1,
+			name:                  "cap exactly reached",
+			numBlocks:             10,
+			blocksPerShard:        1,
 			maxDynamicBlockShards: 10, // maxOutstandingPerTenant=11 minus 1 ingester
 			wantTotalShards:       11, // 1 ingester + 10 block shards
 		},
 		{
-			name:            "cap exceeded – block shards trimmed",
-			numBlocks:       100,
-			blocksPerShard:  1,
+			name:                  "cap exceeded – block shards trimmed",
+			numBlocks:             100,
+			blocksPerShard:        1,
 			maxDynamicBlockShards: 10, // maxOutstandingPerTenant=11 minus 1 ingester
-			wantTotalShards: 11, // 1 ingester + 10 block shards (capped)
+			wantTotalShards:       11, // 1 ingester + 10 block shards (capped)
 		},
 		{
-			name:            "external enabled reduces available block shards",
-			numBlocks:       100,
-			blocksPerShard:  1,
-			externalEnabled: true,
-			maxDynamicBlockShards: 9, // maxOutstandingPerTenant=11 minus 1 ingester minus 1 external
-			wantTotalShards: 11, // 1 ingester + 1 external + 9 block shards (capped)
+			name:                  "external enabled reduces available block shards",
+			numBlocks:             100,
+			blocksPerShard:        1,
+			externalEnabled:       true,
+			maxDynamicBlockShards: 9,  // maxOutstandingPerTenant=11 minus 1 ingester minus 1 external
+			wantTotalShards:       11, // 1 ingester + 1 external + 9 block shards (capped)
 		},
 		{
 			name:                  "zero maxDynamicBlockShards disables cap",
 			numBlocks:             100,
 			blocksPerShard:        1,
 			maxDynamicBlockShards: 0,
-			wantTotalShards: 101, // 1 ingester + 100 block shards (uncapped)
+			wantTotalShards:       101, // 1 ingester + 100 block shards (uncapped)
 		},
 	}
 
@@ -301,8 +301,8 @@ func TestBlocksPerShardRespectsMaxOutstanding(t *testing.T) {
 					BlocksPerShard:  tc.blocksPerShard,
 					ExternalEnabled: tc.externalEnabled,
 				},
-				reader:          &mockReader{metas: metas},
-				blockBoundaries: blockboundary.CreateBlockBoundaries(99),
+				reader:                &mockReader{metas: metas},
+				blockBoundaries:       blockboundary.CreateBlockBoundaries(99),
 				maxDynamicBlockShards: tc.maxDynamicBlockShards,
 			}
 

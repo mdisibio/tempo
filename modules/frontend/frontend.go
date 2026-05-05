@@ -146,7 +146,7 @@ func New(cfg Config, next pipeline.RoundTripper, o overrides.Interface, reader t
 			pipeline.NewWeightRequestWare(pipeline.TraceByID, cfg.Weights),
 			multiTenantMiddleware(cfg, logger),
 			tenantValidatorWare,
-			newAsyncTraceIDSharder(&cfg.TraceByID, jobsPerQuery, logger),
+			newAsyncTraceIDSharder(&cfg.TraceByID, reader, jobsPerQuery, logger),
 		},
 		[]pipeline.Middleware{traceIDStatusCodeWare, retryWare},
 		next)

@@ -62,6 +62,7 @@ type SearchConfig struct {
 type TraceByIDConfig struct {
 	QueryShards      int       `yaml:"query_shards,omitempty"`
 	ConcurrentShards int       `yaml:"concurrent_shards,omitempty"`
+	BlocksPerShard   uint      `yaml:"blocks_per_shard,omitempty"` // BlocksPerShard is used to dynamically create shards based on the number of blocks instead of the fixed amount in QueryShards. Optional and only applies when non-zero.
 	SLO              SLOConfig `yaml:",inline"`
 	ExternalEnabled  bool      `yaml:"external_enabled,omitempty"`
 }

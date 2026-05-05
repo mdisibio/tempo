@@ -68,7 +68,7 @@ func TestBuildShardedRequestsWithExternal(t *testing.T) {
 func TestBuildShardedRequestsBlocksPerShard(t *testing.T) {
 	tests := []struct {
 		name            string
-		blocksPerShard  int
+		blocksPerShard  uint
 		numBlocks       int
 		wantTotalShards int // ingester + block shards
 		wantBlockShards int
@@ -165,7 +165,7 @@ func TestBlocksPerShardTimeRangeFiltering(t *testing.T) {
 	tests := []struct {
 		name            string
 		blocks          []*backend.BlockMeta
-		blocksPerShard  int
+		blocksPerShard  uint
 		startTime       time.Time
 		endTime         time.Time
 		wantTotalShards int // ingester + block shards
@@ -235,6 +235,83 @@ func TestBlocksPerShardTimeRangeFiltering(t *testing.T) {
 				uri := shardedReqs[i].HTTPRequest().RequestURI
 				require.Contains(t, uri, "mode=blocks", "shard %d should be a block shard", i)
 			}
+		})
+	}
+}
+
+// TestBlocksPerShardRespectsMaxOutstanding verifies that the number of block shards is
+// capped so that total jobs never exceed maxOutstandingPerTenant.
+func TestBlocksPerShardRespectsMaxOutstanding(t *testing.T) {
+	tests := []struct {
+		name            string
+		numBlocks       int
+		blocksPerShard  uint
+		maxDynamicBlockShards int // 0 = uncapped
+		externalEnabled bool
+		wantTotalShards int
+	}{
+		{
+			name:            "cap not reached",
+			numBlocks:       10,
+			blocksPerShard:  1,
+			maxDynamicBlockShards: 19, // maxOutstandingPerTenant=20 minus 1 ingester
+			wantTotalShards: 11, // 1 ingester + 10 block shards
+		},
+		{
+			name:            "cap exactly reached",
+			numBlocks:       10,
+			blocksPerShard:  1,
+			maxDynamicBlockShards: 10, // maxOutstandingPerTenant=11 minus 1 ingester
+			wantTotalShards:       11, // 1 ingester + 10 block shards
+		},
+		{
+			name:            "cap exceeded – block shards trimmed",
+			numBlocks:       100,
+			blocksPerShard:  1,
+			maxDynamicBlockShards: 10, // maxOutstandingPerTenant=11 minus 1 ingester
+			wantTotalShards: 11, // 1 ingester + 10 block shards (capped)
+		},
+		{
+			name:            "external enabled reduces available block shards",
+			numBlocks:       100,
+			blocksPerShard:  1,
+			externalEnabled: true,
+			maxDynamicBlockShards: 9, // maxOutstandingPerTenant=11 minus 1 ingester minus 1 external
+			wantTotalShards: 11, // 1 ingester + 1 external + 9 block shards (capped)
+		},
+		{
+			name:                  "zero maxDynamicBlockShards disables cap",
+			numBlocks:             100,
+			blocksPerShard:        1,
+			maxDynamicBlockShards: 0,
+			wantTotalShards: 101, // 1 ingester + 100 block shards (uncapped)
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			metas := make([]*backend.BlockMeta, tc.numBlocks)
+			for i := range metas {
+				metas[i] = &backend.BlockMeta{}
+			}
+
+			sharder := &asyncTraceSharder{
+				cfg: &TraceByIDConfig{
+					QueryShards:     100,
+					BlocksPerShard:  tc.blocksPerShard,
+					ExternalEnabled: tc.externalEnabled,
+				},
+				reader:          &mockReader{metas: metas},
+				blockBoundaries: blockboundary.CreateBlockBoundaries(99),
+				maxDynamicBlockShards: tc.maxDynamicBlockShards,
+			}
+
+			ctx := user.InjectOrgID(context.Background(), "test-tenant")
+			req := httptest.NewRequest("GET", "/", nil).WithContext(ctx)
+
+			shardedReqs, err := sharder.buildShardedRequests(pipeline.NewHTTPRequest(req), time.Time{}, time.Time{})
+			require.NoError(t, err)
+			require.Len(t, shardedReqs, tc.wantTotalShards)
 		})
 	}
 }

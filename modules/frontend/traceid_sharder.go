@@ -23,30 +23,42 @@ const (
 )
 
 type asyncTraceSharder struct {
-	next            pipeline.AsyncRoundTripper[combiner.PipelineResponse]
-	cfg             *TraceByIDConfig
-	reader          tempodb.Reader
-	logger          log.Logger
-	blockBoundaries [][]byte
-	jobsPerQuery    *prometheus.HistogramVec
+	next                  pipeline.AsyncRoundTripper[combiner.PipelineResponse]
+	cfg                   *TraceByIDConfig
+	reader                tempodb.Reader
+	logger                log.Logger
+	blockBoundaries       [][]byte
+	jobsPerQuery          *prometheus.HistogramVec
+	maxDynamicBlockShards int // 0 means uncapped
 }
 
-func newAsyncTraceIDSharder(cfg *TraceByIDConfig, reader tempodb.Reader, jobsPerQuery *prometheus.HistogramVec, logger log.Logger) pipeline.AsyncMiddleware[combiner.PipelineResponse] {
+func newAsyncTraceIDSharder(cfg *TraceByIDConfig, maxOutstandingPerTenant int, reader tempodb.Reader, jobsPerQuery *prometheus.HistogramVec, logger log.Logger) pipeline.AsyncMiddleware[combiner.PipelineResponse] {
 	return pipeline.AsyncMiddlewareFunc[combiner.PipelineResponse](func(next pipeline.AsyncRoundTripper[combiner.PipelineResponse]) pipeline.AsyncRoundTripper[combiner.PipelineResponse] {
-		// Calculate block boundaries:
-		// - If external is enabled: N-2 block shards (1 ingester + 1 external + N-2 blocks = N total)
-		// - If external is disabled: N-1 block shards (1 ingester + N-1 blocks = N total)
-		numBlockShards := cfg.QueryShards - 1
+		// Fixed jobs that are always emitted: 1 ingester (+ 1 external when enabled).
+		fixedJobs := 1
 		if cfg.ExternalEnabled {
-			numBlockShards = cfg.QueryShards - 2
+			fixedJobs++
 		}
+
+		// Pre-computed boundaries for the query_shards path (used when blocks_per_shard isn't configured).
+		fixedBlockShards := cfg.QueryShards - fixedJobs
+		blockBoundaries := blockboundary.CreateBlockBoundaries(fixedBlockShards)
+
+		// Set the maximum for the dynamic blocks_per_shard path, which can never exceed
+		// the max number of jobs per tenant (minus the fixed jobs).
+		maxDynamicBlockShards := 0
+		if maxOutstandingPerTenant > 0 {
+			maxDynamicBlockShards = maxOutstandingPerTenant - fixedJobs
+		}
+
 		return asyncTraceSharder{
-			next:            next,
-			cfg:             cfg,
-			reader:          reader,
-			logger:          logger,
-			blockBoundaries: blockboundary.CreateBlockBoundaries(numBlockShards),
-			jobsPerQuery:    jobsPerQuery,
+			next:                  next,
+			cfg:                   cfg,
+			reader:                reader,
+			logger:                logger,
+			blockBoundaries:       blockBoundaries,
+			jobsPerQuery:          jobsPerQuery,
+			maxDynamicBlockShards: maxDynamicBlockShards,
 		}
 	})
 }
@@ -103,8 +115,9 @@ func (s *asyncTraceSharder) blockBoundariesForTenant(tenantID string, startTime,
 
 	blocks := s.reader.BlockMetas(tenantID)
 
-	// Filter to the requested time range so the shard count reflects only the blocks
-	// that will actually be inspected for this query.
+	// If time range is provided, filter it down to the blocks within range. We
+	// don't care about the actual blocks here, it's just an estimate to determine
+	// the number of shards.
 	if !startTime.IsZero() && !endTime.IsZero() {
 		blocks = blockMetasForSearch(blocks, startTime, endTime, acceptAllBlocks)
 	}
@@ -117,6 +130,13 @@ func (s *asyncTraceSharder) blockBoundariesForTenant(tenantID string, startTime,
 	if numBlockShards < 1 {
 		numBlockShards = 1
 	}
+
+	// Never exceed the max queue depth (0 means uncapped).
+	// It is better to run with sub-optimal sharding, than exceed the max queue depth and fail.
+	if s.maxDynamicBlockShards > 0 && numBlockShards > s.maxDynamicBlockShards {
+		numBlockShards = s.maxDynamicBlockShards
+	}
+
 	return blockboundary.CreateBlockBoundaries(numBlockShards)
 }
 

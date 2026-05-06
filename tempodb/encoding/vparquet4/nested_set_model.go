@@ -32,12 +32,12 @@ func assignNestedSetModelBoundsAndServiceStats(trace *Trace) bool {
 		}
 	}
 
-	// find root spans and map span IDs to tree nodes
+	// map span IDs to tree nodes
 	var (
 		undoAssignment bool
+		hasRoot        bool
 		allNodes       = make([]spanNode, 0, spanCount)
 		nodesByID      = make(map[uint64][]*spanNode, spanCount)
-		rootNodes      []*spanNode
 	)
 
 	// initialize ServiceStats (spanCount and errorCount per service)
@@ -54,7 +54,7 @@ func assignNestedSetModelBoundsAndServiceStats(trace *Trace) bool {
 				node := &allNodes[len(allNodes)-1]
 
 				if s.IsRoot() {
-					rootNodes = append(rootNodes, node)
+					hasRoot = true
 				}
 
 				id := util.SpanIDToUint64(s.SpanID)
@@ -78,10 +78,6 @@ func assignNestedSetModelBoundsAndServiceStats(trace *Trace) bool {
 		trace.ServiceStats[rs.Resource.ServiceName] = serviceStats
 	}
 
-	// check preconditions before assignment
-	if len(rootNodes) == 0 {
-		return false
-	}
 	if undoAssignment {
 		for _, nodes := range nodesByID {
 			for _, n := range nodes {
@@ -95,7 +91,10 @@ func assignNestedSetModelBoundsAndServiceStats(trace *Trace) bool {
 		return false
 	}
 
-	connected := true
+	// If this trace has a root span it may be connected — verified below by checking that
+	// every non-root span finds its parent. A trace without a root span is never considered
+	// connected, and that includes empty traces.
+	connected := hasRoot
 	// build the tree
 	for i := range allNodes {
 		node := &allNodes[i]

@@ -267,6 +267,9 @@ func TestAssignNestedSetModelBounds(t *testing.T) {
 			expectedConnected: false,
 		},
 		{
+			// A->B->C chain where A is dropped. With no true root present, B becomes
+			// an orphan sub-root and still receives valid nested set bounds so structural
+			// queries work within the connected B->C segment.
 			name: "no roots",
 			trace: [][]Span{
 				{
@@ -276,8 +279,8 @@ func TestAssignNestedSetModelBounds(t *testing.T) {
 			},
 			expected: [][]Span{
 				{
-					{SpanID: []byte("cccccccc"), ParentSpanID: []byte("bbbbbbbb")},
-					{SpanID: []byte("bbbbbbbb"), ParentSpanID: []byte("aaaaaaaa")},
+					{SpanID: []byte("cccccccc"), ParentSpanID: []byte("bbbbbbbb"), NestedSetLeft: 2, NestedSetRight: 3, ParentID: 1},
+					{SpanID: []byte("bbbbbbbb"), ParentSpanID: []byte("aaaaaaaa"), NestedSetLeft: 1, NestedSetRight: 4, ParentID: 0},
 				},
 			},
 			expectedConnected: false,

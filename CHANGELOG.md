@@ -1,5 +1,7 @@
 ## main / unreleased
 
+* [ENHANCEMENT] **BREAKING CHANGE** Query-frontend: new job sharding approach for trace lookups, using a new config option `blocks_per_shard` which replaces `query_shards`. [#7105](https://github.com/grafana/tempo/pull/7105) (@mdisibio)
+
 # v3.0.0-rc.1
 
 * [CHANGE] Stop publishing 32-bit ARM binary archives. Release artifacts continue to include amd64 and arm64 binaries. [#7106](https://github.com/grafana/tempo/pull/7106) (@javiermolinar)
@@ -72,7 +74,6 @@
 * [ENHANCEMENT] Remove explicit `runtime.GC()` calls in vParquet5 compactor/block creation and CLI [#6603](https://github.com/grafana/tempo/pull/6603) (@oleg-kozlyuk-grafana)
 * [ENHANCEMENT] Reduce allocations in `extendReuseSlice` growth path during WAL writes and block creation [#6863](https://github.com/grafana/tempo/pull/6863) (@mapno)
 * [ENHANCEMENT] Implemented anti-affinity for pods in same livestore zone [#6757](https://github.com/grafana/tempo/pull/6757) (@zhxiaogg)
-* [ENHANCEMENT] **BREAKING CHANGE** Query-frontend: new job sharding approach for trace lookups, using a new config option `blocks_per_shard` which replaces `query_shards`. [#7105](https://github.com/grafana/tempo/pull/7105) (@mdisibio)
 * [ENHANCEMENT] Livestore: skipped WAL complete op during shutdown [#6839](https://github.com/grafana/tempo/pull/6839) (@zhxiaogg)
 * [ENHANCEMENT] Add metric to track livestore block cut reasons [#6922](https://github.com/grafana/tempo/pull/6922) (@zhxiaogg)
 * [ENHANCEMENT] Enable async parquet read mode for WAL completion path [#6967](https://github.com/grafana/tempo/pull/6967) (@zhxiaogg)

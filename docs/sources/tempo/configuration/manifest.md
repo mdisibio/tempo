@@ -344,6 +344,7 @@ query_frontend:
         max_spans_per_span_set: 100
     trace_by_id:
         query_shards: 50
+        blocks_per_shard: 30
     metrics:
         concurrent_jobs: 1000
         target_bytes_per_job: 104857600

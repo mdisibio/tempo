@@ -444,4 +444,3 @@ func writeFormattedContentForRequest(w http.ResponseWriter, req *http.Request, m
 
 	}
 }
-

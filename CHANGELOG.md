@@ -1,5 +1,7 @@
 ## main / unreleased
 
+* [BUGFIX] Fix race conditions in trace by ID combiner that could cause panics during protobuf marshaling when partial results arrive after the combiner is finalized [#7116](https://github.com/grafana/tempo/pull/7116) (@mdisibio)
+
 # v3.0.0-rc.1
 
 * [CHANGE] Stop publishing 32-bit ARM binary archives. Release artifacts continue to include amd64 and arm64 binaries. [#7106](https://github.com/grafana/tempo/pull/7106) (@javiermolinar)

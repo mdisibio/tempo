@@ -8,6 +8,14 @@
   local scaleDownBehavior = scaledObject.spec.advanced.horizontalPodAutoscalerConfig.behavior.scaleDown,
 
   _config+:: {
+    // Prometheus server address used by all KEDA Prometheus triggers.
+    // Must be set explicitly when enabling any Prometheus-based autoscaler (e.g. backend_worker).
+    autoscaling_prometheus_url: '',
+    // Optional tenant ID sent as the X-Scope-OrgID header on every KEDA Prometheus
+    // scrape request. Required when the backend is a multi-tenant system such as
+    // Grafana Mimir. Leave empty (default) for single-tenant setups.
+    autoscaling_prometheus_tenant: '',
+
     distributor+: {
       keda: {
         enabled: false,
@@ -51,8 +59,6 @@
         min_replicas: 3,
         max_replicas: 200,
         paused_replicas: 0,
-        // Prometheus server address for the autoscaling trigger.
-        prometheus_address: '',
         // Average outstanding blocks per pod threshold.
         threshold: 200,
         // Prometheus query returning the average outstanding blocks per backend-worker.
@@ -99,6 +105,21 @@
     block_builder_max_unavailable:
       if $._config.block_builder.keda.enabled then '100%'
       else $.tempo_block_builder_statefulset.spec.replicas,
+  },
+
+  // Returns a KEDA Prometheus trigger using the shared autoscaling_prometheus_url and
+  // autoscaling_prometheus_tenant config. All Prometheus-based scalers should use this
+  // so that the URL and X-Scope-OrgID header are configured in one place.
+  prometheusTrigger(query, metricName, threshold):: {
+    type: 'prometheus',
+    metadata: {
+      serverAddress: $._config.autoscaling_prometheus_url,
+      [if $._config.autoscaling_prometheus_tenant != '' then 'customHeaders']:
+        'X-Scope-OrgID=%s' % $._config.autoscaling_prometheus_tenant,
+      metricName: metricName,
+      query: query,
+      threshold: threshold,
+    },
   },
 
   // Create a KEDA ScaledObject for a target controller with configurable scaling behavior.
@@ -195,17 +216,15 @@
   //
   tempo_backend_worker_scaled_object:
     if $._config.backend_worker.keda.enabled then
-      assert $._config.backend_worker.keda.prometheus_address != '' : 'backend_worker.keda.prometheus_address is required for backend_worker autoscaling';
+      assert $._config.autoscaling_prometheus_url != '' : 'autoscaling_prometheus_url is required for backend_worker autoscaling';
       $.scaledObjectForController($.tempo_backend_worker_statefulset, 'backend_worker')
-      + scaledObject.spec.withTriggersMixin([{
-        type: 'prometheus',
-        metadata: {
-          serverAddress: $._config.backend_worker.keda.prometheus_address,
-          metricName: 'tempodb_compaction_outstanding_blocks',
-          query: $._config.backend_worker.keda.query,
-          threshold: '%d' % $._config.backend_worker.keda.threshold,
-        },
-      }])
+      + scaledObject.spec.withTriggersMixin([
+        $.prometheusTrigger(
+          query=$._config.backend_worker.keda.query,
+          metricName='tempodb_compaction_outstanding_blocks',
+          threshold='%d' % $._config.backend_worker.keda.threshold,
+        ),
+      ])
     else {},
 
   tempo_backend_worker_statefulset+:

@@ -686,3 +686,95 @@ func TestProviderBasedScheduling(t *testing.T) {
 	require.GreaterOrEqual(t, retentionJobs, 1)
 	require.GreaterOrEqual(t, compactionJobs, 1)
 }
+
+// TestCleanupOrphanedBatchesAfterDeadJobTimeout verifies that
+// cleanupOrphanedBatches removes a batch whose redaction jobs were all
+// transitioned to FAILED by the Prune dead-job timeout path.
+//
+// Regression test for the bug where Prune called j.Fail() directly (to avoid
+// re-acquiring the shard lock), bypassing UpdateJob → cleanupBatchIfDone, and
+// leaving the batch in batchStore permanently. The fix adds
+// cleanupOrphanedBatches to the maintenance tick after each Prune call.
+func TestCleanupOrphanedBatchesAfterDeadJobTimeout(t *testing.T) {
+	cfg := Config{}
+	cfg.RegisterFlagsAndApplyDefaults("", &flag.FlagSet{})
+	// RescanDelay = 0 and no compaction jobs racing with submission, so the
+	// batch has RescanAfterUnixNano == 0 and cleanupBatchIfDone won't block on it.
+	cfg.ProviderConfig.Redaction.RescanDelay = 0
+
+	tmpDir := t.TempDir()
+	cfg.LocalWorkPath = tmpDir
+
+	ctx, cancel := context.WithCancel(context.Background())
+	store, rr, ww := newStore(ctx, t, tmpDir)
+	defer func() {
+		cancel()
+		store.Shutdown()
+	}()
+
+	limits, err := overrides.NewOverrides(overrides.Config{Defaults: overrides.Overrides{}}, nil, prometheus.NewRegistry())
+	require.NoError(t, err)
+
+	testTenant := "tenant-orphan-batch"
+	writeTenantBlocks(ctx, t, backend.NewWriter(ww), testTenant, 2)
+	time.Sleep(300 * time.Millisecond)
+
+	s, err := New(cfg, store, limits, rr, ww)
+	require.NoError(t, err)
+	// Do NOT call s.starting — it would launch background goroutines that race
+	// with the manual job lifecycle below.
+
+	// Submit a redaction. With 2 blocks, we expect 2 pending jobs.
+	resp, err := s.SubmitRedaction(ctx, &tempopb.SubmitRedactionRequest{
+		TenantId: testTenant,
+		TraceIds: [][]byte{[]byte(uuid.New().String())},
+	})
+	require.NoError(t, err)
+	require.Greater(t, int(resp.JobsCreated), 0)
+	require.True(t, s.work.TenantPending(testTenant), "batch must be active after submission")
+
+	// Simulate workers picking up all pending redaction jobs. For each job:
+	// pop from pending → register → assign worker → promote to active → start.
+	// This mirrors the production path in backendscheduler.Next().
+	for i := 0; ; i++ {
+		j := s.work.NextPendingJob(tempopb.JobType_JOB_TYPE_REDACTION)
+		if j == nil {
+			break
+		}
+		s.work.RegisterJob(j)
+		j.SetWorkerID("worker-" + strconv.Itoa(i))
+		require.NoError(t, s.work.AddJob(j))
+		s.work.StartJob(j.ID)
+		// Back-date the start time so Prune sees the job as past DeadJobTimeout
+		// (default 24h). Use 25h to give a clear margin.
+		s.work.GetJob(j.ID).StartTime = time.Now().Add(-25 * time.Hour)
+	}
+
+	require.True(t, s.work.HasJobsForTenant(testTenant, tempopb.JobType_JOB_TYPE_REDACTION),
+		"jobs must be running before prune")
+
+	// Prune transitions timed-out running jobs to FAILED and cleans up indexes,
+	// but does NOT call cleanupBatchIfDone — that is the bug this test covers.
+	s.work.Prune(ctx)
+
+	require.False(t, s.work.HasJobsForTenant(testTenant, tempopb.JobType_JOB_TYPE_REDACTION),
+		"no active jobs should remain after prune")
+	require.NotNil(t, s.work.GetBatch(testTenant),
+		"batch must still exist after prune alone (orphaned batch bug)")
+
+	// cleanupOrphanedBatches is the fix: it sweeps all batches and removes any
+	// whose jobs have all finished. This is now called on every maintenance tick.
+	s.cleanupOrphanedBatches(ctx)
+
+	require.Nil(t, s.work.GetBatch(testTenant),
+		"batch must be removed after cleanupOrphanedBatches")
+	require.False(t, s.work.TenantPending(testTenant),
+		"tenant must not be blocked after batch cleanup")
+
+	// A new redaction submission must succeed — the tenant is no longer locked out.
+	_, err = s.SubmitRedaction(ctx, &tempopb.SubmitRedactionRequest{
+		TenantId: testTenant,
+		TraceIds: [][]byte{[]byte(uuid.New().String())},
+	})
+	require.NoError(t, err, "SubmitRedaction must not return AlreadyExists after batch cleanup")
+}

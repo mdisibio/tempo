@@ -933,6 +933,11 @@ query_frontend:
     # (default: 128 KiB)
     [max_query_expression_size_bytes: <int> | default = 131072]
 
+    # List of AST transformation names to disable globally for all TraceQL queries.
+    # Possible values: "or_to_in", "all" ("all" disables every transformation).
+    # (default: <empty list>, all transformations enabled)
+    [skip_ast_transformations: <list of strings> | default = []]
+
     search:
 
         # The number of concurrent jobs to execute when searching the backend.
@@ -1002,12 +1007,18 @@ query_frontend:
     # Trace by ID lookup configuration
     trace_by_id:
         # The number of shards to split a trace by id query into.
+        # (Deprecated, only used when blocks_per_shard is 0)
         # (default: 50)
         [query_shards: <int>]
 
-        # The maximum number of shards to execute at once. If set to 0 query_shards is used.
+        # The maximum number of shards to execute at once. If set to 0 then all are run concurrently.
         # (default: 0)
         [concurrent_shards: <int>]
+
+        # Determines the number of shards dynamically by targeting this number
+        # of blocks per shard. A value of 0 disables this feature and falls back to query_shards.
+        # (default: 30)
+        [blocks_per_shard: <int>]
 
         # Enable external trace source for trace-by-ID queries. When enabled,
         # the frontend will create an additional shard to query the external endpoint

@@ -46,6 +46,10 @@ type Config struct {
 
 	// QueryEndCutoff prevents querying incomplete recent data.
 	QueryEndCutoff time.Duration `yaml:"query_end_cutoff,omitempty"`
+
+	// SkipASTTransformations is a list of AST transformation names to disable globally.
+	// Valid names: "or_to_in". Use "all" to disable all transformations.
+	SkipASTTransformations []string `yaml:"skip_ast_transformations,omitempty"`
 }
 
 type MCPServerConfig struct {
@@ -62,6 +66,7 @@ type SearchConfig struct {
 type TraceByIDConfig struct {
 	QueryShards      int       `yaml:"query_shards,omitempty"`
 	ConcurrentShards int       `yaml:"concurrent_shards,omitempty"`
+	BlocksPerShard   uint      `yaml:"blocks_per_shard,omitempty"` // BlocksPerShard is used to dynamically create shards based on the number of blocks instead of the fixed amount in QueryShards. Set to 0 to disable and fall back to QueryShards.
 	SLO              SLOConfig `yaml:",inline"`
 	ExternalEnabled  bool      `yaml:"external_enabled,omitempty"`
 }
@@ -103,8 +108,9 @@ func (cfg *Config) RegisterFlagsAndApplyDefaults(prefix string, f *flag.FlagSet)
 		SLO: slo,
 	}
 	cfg.TraceByID = TraceByIDConfig{
-		QueryShards: 50,
-		SLO:         slo,
+		QueryShards:    50,
+		BlocksPerShard: 30, // This is a good default for most workloads, found by surveying production deployments.
+		SLO:            slo,
 	}
 	cfg.Metrics = MetricsConfig{
 		Sharder: QueryRangeSharderConfig{

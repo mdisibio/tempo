@@ -61,7 +61,7 @@ func (m *mockReader) FetchTagValues(context.Context, *backend.BlockMeta, traceql
 	return nil
 }
 
-func (m *mockReader) Find(context.Context, string, common.ID, string, string, int64, int64, common.SearchOptions) ([]*tempopb.TraceByIDResponse, []error, error) {
+func (m *mockReader) Find(context.Context, string, common.ID, string, string, time.Time, time.Time, common.SearchOptions) ([]*tempopb.TraceByIDResponse, []error, error) {
 	return nil, nil, nil
 }
 

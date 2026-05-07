@@ -311,7 +311,7 @@ func TestBackendSchedulerRedaction(t *testing.T) {
 
 		// Verify the trace is findable before redaction by querying object storage directly.
 		tempodbReader.EnablePolling(ctx, nil, false)
-		trs, failedBlocks, err := tempodbReader.Find(ctx, testTenant, traceID, tempodb.BlockIDMin, tempodb.BlockIDMax, 0, 0, common.DefaultSearchOptions())
+		trs, failedBlocks, err := tempodbReader.Find(ctx, testTenant, traceID, tempodb.BlockIDMin, tempodb.BlockIDMax, time.Time{}, time.Time{}, common.DefaultSearchOptions())
 		require.NoError(t, err)
 		require.Empty(t, failedBlocks, "no blocks should fail lookup")
 		require.NotEmpty(t, trs, "trace must be findable in all blocks before redaction")
@@ -364,7 +364,7 @@ func TestBackendSchedulerRedaction(t *testing.T) {
 		// of the lookback window and the trace is no longer findable.
 		require.Eventually(t, func() bool {
 			tempodbReader.PollNow(ctx)
-			trs, _, err = tempodbReader.Find(ctx, testTenant, traceID, tempodb.BlockIDMin, tempodb.BlockIDMax, 0, 0, common.DefaultSearchOptions())
+			trs, _, err = tempodbReader.Find(ctx, testTenant, traceID, tempodb.BlockIDMin, tempodb.BlockIDMax, time.Time{}, time.Time{}, common.DefaultSearchOptions())
 			return err == nil && len(trs) == 0
 		}, 60*time.Second, 2*time.Second, "trace must not be findable in any block after redaction")
 	})

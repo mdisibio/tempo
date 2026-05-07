@@ -187,6 +187,36 @@ func TestAssignNestedSetModelBounds(t *testing.T) {
 			expectedConnected: false,
 		},
 		{
+			// Linear chain A->B->C->D->E->F->G->H with C and F dropped (two gaps).
+			// Produces three disjoint connected segments: A->B, D->E, and G->H. Each
+			// segment gets its own nested-set interval range so the tail subtree G->H
+			// does not overlap [1,4] (A->B) or [5,8] (D->E).
+			name: "two gaps",
+			trace: [][]Span{
+				{
+					{SpanID: []byte("aaaaaaaa")},
+					{SpanID: []byte("bbbbbbbb"), ParentSpanID: []byte("aaaaaaaa")},
+					// cccccccc missing (dropped)
+					{SpanID: []byte("dddddddd"), ParentSpanID: []byte("cccccccc")},
+					{SpanID: []byte("eeeeeeee"), ParentSpanID: []byte("dddddddd")},
+					// ffffffff missing (dropped)
+					{SpanID: []byte("gggggggg"), ParentSpanID: []byte("ffffffff")},
+					{SpanID: []byte("hhhhhhhh"), ParentSpanID: []byte("gggggggg")},
+				},
+			},
+			expected: [][]Span{
+				{
+					{SpanID: []byte("aaaaaaaa"), NestedSetLeft: 1, NestedSetRight: 4, ParentID: -1, ChildCount: 1},
+					{SpanID: []byte("bbbbbbbb"), ParentSpanID: []byte("aaaaaaaa"), NestedSetLeft: 2, NestedSetRight: 3, ParentID: 1, ChildCount: 0},
+					{SpanID: []byte("dddddddd"), ParentSpanID: []byte("cccccccc"), NestedSetLeft: 5, NestedSetRight: 8, ParentID: 0, ChildCount: 1},
+					{SpanID: []byte("eeeeeeee"), ParentSpanID: []byte("dddddddd"), NestedSetLeft: 6, NestedSetRight: 7, ParentID: 5, ChildCount: 0},
+					{SpanID: []byte("gggggggg"), ParentSpanID: []byte("ffffffff"), NestedSetLeft: 9, NestedSetRight: 12, ParentID: 0, ChildCount: 1},
+					{SpanID: []byte("hhhhhhhh"), ParentSpanID: []byte("gggggggg"), NestedSetLeft: 10, NestedSetRight: 11, ParentID: 9, ChildCount: 0},
+				},
+			},
+			expectedConnected: false,
+		},
+		{
 			name: "partially assigned",
 			trace: [][]Span{
 				{

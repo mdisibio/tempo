@@ -133,7 +133,19 @@ func makePipelineWithRowGroups(ctx context.Context, req *tempopb.SearchRequest, 
 	for k, v := range req.Tags {
 		// dedicated attribute columns
 		if c, ok := spanAndResourceColumnMapping.get(k); ok {
-			resourceIters = append(resourceIters, makeIter(c.ColumnPath, pq.NewSubstringPredicate(v), ""))
+			switch c.Type {
+			case backend.DedicatedColumnTypeInt:
+				if i, err := strconv.Atoi(v); err == nil {
+					// Column is integer and so is input, do integer comparison.
+					resourceIters = append(resourceIters, makeIter(c.ColumnPath, pq.NewIntEqualPredicate(int64(i)), ""))
+				} else {
+					// Column is integer but input is not, so fallback to the generic string handling.
+					otherAttrConditions[k] = v
+					continue
+				}
+			case backend.DedicatedColumnTypeString:
+				resourceIters = append(resourceIters, makeIter(c.ColumnPath, pq.NewSubstringPredicate(v), ""))
+			}
 			continue
 		}
 

@@ -51,6 +51,7 @@ func TestBackendBlockSearch(t *testing.T) {
 						String03: []string{"dedicated-resource-attr-value-3"},
 						String04: []string{"dedicated-resource-attr-value-4"},
 						String05: []string{"dedicated-resource-attr-value-5"},
+						Int01:    []int64{1},
 					},
 				},
 				ScopeSpans: []ScopeSpans{
@@ -148,6 +149,7 @@ func TestBackendBlockSearch(t *testing.T) {
 
 		// Dedicated resource attributes
 		makeReq("dedicated.resource.3", "dedicated-resource-attr-value-3"),
+		makeReq("dedicated.resource.6", "1"), // Will be converted to integer comparison
 
 		// Well-known span attributes
 		makeReq(LabelName, "ell"),
@@ -247,6 +249,77 @@ func TestBackendBlockSearch(t *testing.T) {
 		require.NoError(t, err)
 		meta := findInResults(expected.TraceID, res.Traces)
 		require.Nil(t, meta, req)
+	}
+}
+
+// TestBackendBlockSearchLegacyTagsServiceNameHTTP500 exercises the legacy tag-based Search API
+// (tempopb.SearchRequest.Tags) with service.name and http.status_code together. The block uses
+// backend.DefaultDedicatedColumns() so span attributes like http.status_code use dedicated column
+// mappings (see makePipelineWithRowGroups). service.name still uses labelMappings.
+func TestBackendBlockSearchLegacyTagsServiceNameHTTP500(t *testing.T) {
+	ctx := context.Background()
+	id := test.ValidTraceID(nil)
+
+	buildTrace := func(spanAttrs []Attribute) *Trace {
+		return &Trace{
+			TraceID:           id,
+			TraceIDText:       util.TraceIDToHexString(id),
+			StartTimeUnixNano: uint64(1 * time.Second),
+			EndTimeUnixNano:   uint64(2 * time.Second),
+			DurationNano:      uint64(1 * time.Second),
+			ResourceSpans: []ResourceSpans{
+				{
+					Resource: Resource{
+						ServiceName: "foo",
+					},
+					ScopeSpans: []ScopeSpans{
+						{
+							SpanCount: 1,
+							Spans: []Span{
+								{
+									Name:       "span",
+									SpanID:     []byte("spanid01"),
+									StatusCode: int(v1.Status_STATUS_CODE_OK),
+									Attrs:      spanAttrs,
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	req := &tempopb.SearchRequest{
+		Tags: map[string]string{
+			LabelServiceName:    "foo",
+			LabelHTTPStatusCode: "500",
+		},
+		Limit: 20,
+	}
+
+	tests := []struct {
+		name      string
+		spanAttrs []Attribute
+	}{
+		{name: "http.status_code stored as int", spanAttrs: []Attribute{attr(LabelHTTPStatusCode, 500)}},
+		{name: "http.status_code stored as string", spanAttrs: []Attribute{attr(LabelHTTPStatusCode, "500")}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			b := makeBackendBlockWithTracesWithDedicatedColumns(t, []*Trace{buildTrace(tt.spanAttrs)}, backend.DefaultDedicatedColumns())
+
+			require.NotPanics(t, func() {
+				res, err := b.Search(ctx, req, common.DefaultSearchOptions())
+				require.NoError(t, err)
+				require.NotNil(t, res)
+				// Consume results fully so phase-2 metadata assembly runs if matches exist.
+				_ = res.Traces
+			})
+		})
 	}
 }
 

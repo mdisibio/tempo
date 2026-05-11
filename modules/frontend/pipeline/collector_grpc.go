@@ -88,13 +88,13 @@ func (c GRPCCollector[T]) RoundTrip(req *http.Request) error {
 func (c GRPCCollector[T]) sendSegmented(req *http.Request, resp T, maxSize int) error {
 	// If no max, then send as-is.
 	if maxSize <= 0 {
-		return c.send(resp)
+		return grpcError(c.send(resp))
 	}
 
 	// Split the response into smaller packets and send individually.
 	grpcPackets, err := c.combiner.GRPCSegment(resp, maxSize)
 	if err != nil {
-		return err
+		return grpcError(err)
 	}
 
 	for _, packet := range grpcPackets {

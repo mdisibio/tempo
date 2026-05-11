@@ -807,19 +807,53 @@ func TestSegmentSearchResponse(t *testing.T) {
 				SpanSet: &tempopb.SpanSet{
 					Spans: []*tempopb.Span{
 						{SpanID: "4", Name: "span4", StartTimeUnixNano: 4000, DurationNanos: 400},
+					},
+				},
+			},
+			{
+				TraceID: "c",
+				SpanSet: &tempopb.SpanSet{
+					Spans: []*tempopb.Span{
 						{SpanID: "5", Name: "span5", StartTimeUnixNano: 5000, DurationNanos: 500},
 					},
 				},
 			},
 		},
 	}
-	const maxSize = 1
-	out := segmentSearchResponse(input, maxSize)
-	require.Len(t, out, 2)
-	require.Len(t, out[0].Traces, 1)
-	require.Len(t, out[1].Traces, 1)
-	require.Equal(t, input.Traces[0], out[0].Traces[0])
-	require.Equal(t, input.Traces[1], out[1].Traces[0])
-	require.Equal(t, input.Metrics, out[0].Metrics)
-	require.Equal(t, input.Metrics, out[1].Metrics)
+
+	t.Run("fits", func(t *testing.T) {
+		// Generate a test packet size that is large enough for only part of the data.
+		maxSize := (&tempopb.SearchResponse{
+			Metrics: input.Metrics,
+			Traces:  input.Traces[:2],
+		}).Size()
+		out := segmentSearchResponse(input, maxSize)
+
+		require.Len(t, out, 2)
+		requireProtoSegmentsFit(t, out, maxSize)
+		require.Len(t, out[0].Traces, 2)
+		require.Len(t, out[1].Traces, 1)
+		require.Equal(t, input.Traces[0], out[0].Traces[0])
+		require.Equal(t, input.Traces[1], out[0].Traces[1])
+		require.Equal(t, input.Traces[2], out[1].Traces[0])
+		require.Equal(t, input.Metrics, out[0].Metrics)
+		require.Equal(t, input.Metrics, out[1].Metrics)
+	})
+
+	t.Run("at least one", func(t *testing.T) {
+		// This is smaller than every item but will test logic to ensure we always send at least one item even if too big
+		const maxSize = 1
+		out := segmentSearchResponse(input, maxSize)
+
+		require.Len(t, out, 3)
+		require.Len(t, out[0].Traces, 1)
+		require.Len(t, out[1].Traces, 1)
+		require.Len(t, out[2].Traces, 1)
+		require.Equal(t, input.Traces[0], out[0].Traces[0])
+		require.Equal(t, input.Traces[1], out[1].Traces[0])
+		require.Equal(t, input.Traces[2], out[2].Traces[0])
+		require.Equal(t, input.Metrics, out[0].Metrics)
+		require.Equal(t, input.Metrics, out[1].Metrics)
+		require.Equal(t, input.Metrics, out[2].Metrics)
+	})
 }

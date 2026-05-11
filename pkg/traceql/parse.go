@@ -3,6 +3,7 @@ package traceql
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"text/scanner"
 
@@ -15,16 +16,25 @@ func init() {
 	// yyDebug = 3
 	// replaces constants with actual identifiers in error messages
 	//   i.e. "expecting OPEN_BRACE" => "expecting {"
-	for str, tok := range tokens {
+	for str, tok := range tokenMap {
 		yyToknames[tok-yyPrivate+1] = str
 	}
 }
 
-func Parse(s string) (expr *RootExpr, err error) {
-	return ParseWithOptimizationOption(s, true)
+// Parse parses a TraceQL query string and applies AST transformations according to opts.
+// Options specific to metrics queries (e.g. WithSpanOnlyFetch) are ignored here.
+func Parse(s string, opts ...CompileOption) (expr *RootExpr, err error) {
+	cfg := applyCompileOptions(opts...)
+	return parseInternal(s, cfg.skipTransformations, cfg.allowUnsafeHints)
 }
 
-func ParseWithOptimizationOption(s string, astOptimization bool) (expr *RootExpr, err error) {
+// ParseNoOptimizations parses a TraceQL query without applying any AST transformations.
+// Use for contexts where only hints or query structure are inspected and not executed, like hint extraction, validation, etc.
+func ParseNoOptimizations(s string) (*RootExpr, error) {
+	return parseInternal(s, []string{TransformationAll}, false)
+}
+
+func parseInternal(s string, skipTransformations []string, allowUnsafeHints bool) (expr *RootExpr, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			var ok bool
@@ -52,9 +62,17 @@ func ParseWithOptimizationOption(s string, astOptimization bool) (expr *RootExpr
 		return nil, fmt.Errorf("unknown parse error: %d", e)
 	}
 
-	hintSkipOptimization, _ := l.expr.Hints.GetBool(HintSkipOptimization, true)
-	if astOptimization && !hintSkipOptimization {
-		l.expr = ApplyDefaultASTRewrites(l.expr)
+	if transformations, ok := l.expr.Hints.GetStringSlice(HintSkipASTTransformations, allowUnsafeHints); ok {
+		for _, name := range transformations {
+			name = strings.TrimSpace(name)
+			if name != "" && !slices.Contains(skipTransformations, name) {
+				skipTransformations = append(skipTransformations, name)
+			}
+		}
+	}
+
+	l.expr = ApplyASTRewrites(l.expr, skipTransformations)
+	if l.expr.OptimizationCount > 0 {
 		level.Debug(log.Logger).Log("msg", "optimize AST for TraceQL query", "query", s, "optimizedQuery", l.expr.String(), "optimizationCount", l.expr.OptimizationCount)
 	}
 
@@ -62,11 +80,15 @@ func ParseWithOptimizationOption(s string, astOptimization bool) (expr *RootExpr
 }
 
 // warning: ParseIdentifier is used to parse filter policies in pkg/spanfilter/config/config.go
-// if changed, it can break existing config
+// if changed, it can break existing config.
+//
+// Behavioral note vs. the previous implementation: this now rejects identifiers containing
+// unquoted spaces (e.g. ".foo bar") that were previously accepted via HasPrefix matching.
+// Quoted identifiers with spaces (e.g. span."foo bar") are still accepted.
 func ParseIdentifier(s string) (Attribute, error) {
 	// Wrap the identifier in curly braces to create a valid spanset filter expression
 	attr := "{" + s + "}"
-	expr, err := Parse(attr)
+	expr, err := ParseNoOptimizations(attr)
 	if err != nil {
 		return Attribute{}, fmt.Errorf("failed to parse identifier %s: %w", s, err)
 	}

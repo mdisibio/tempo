@@ -18,9 +18,10 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	oteltrace "go.opentelemetry.io/otel/trace"
 	"go.uber.org/atomic"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/go-kit/log/level"
-	"github.com/grafana/tempo/modules/ingester"
 	"github.com/grafana/tempo/pkg/api"
 	"github.com/grafana/tempo/pkg/boundedwaitgroup"
 	"github.com/grafana/tempo/pkg/collector"
@@ -55,8 +56,16 @@ type blockFn func(ctx context.Context, meta *backend.BlockMeta, b block) error
 // iterateBlocks provides a way to iterate over all blocks (head, wal, complete)
 // using concurrent processing with bounded concurrency.
 func (i *instance) iterateBlocks(ctx context.Context, reqStart, reqEnd time.Time, fn blockFn) error {
+	ctx, span := tracer.Start(ctx, "instance.iterateBlocks",
+		oteltrace.WithAttributes(attribute.String("tenant", i.tenantID)))
+	defer span.End()
+
 	i.blocksMtx.RLock()
-	defer i.blocksMtx.RUnlock()
+	span.AddEvent("acquired blocksMtx")
+	defer func() {
+		i.blocksMtx.RUnlock()
+		span.AddEvent("released blocksMtx")
+	}()
 
 	var anyErr atomic.Error
 	ctx, cancel := context.WithCancel(ctx)
@@ -137,7 +146,7 @@ func (i *instance) iterateBlocks(ctx context.Context, reqStart, reqEnd time.Time
 		}
 
 		wg.Add(1)
-		go func(block *ingester.LocalBlock) {
+		go func(block *LocalBlock) {
 			defer wg.Done()
 
 			if ctx.Err() != nil {
@@ -177,7 +186,7 @@ func (i *instance) Search(ctx context.Context, req *tempopb.SearchRequest) (*tem
 
 	mostRecent := false
 	if len(req.Query) > 0 {
-		rootExpr, err := traceql.Parse(req.Query)
+		rootExpr, err := traceql.ParseNoOptimizations(req.Query)
 		if err != nil {
 			return nil, fmt.Errorf("error parsing query: %w", err)
 		}
@@ -205,11 +214,24 @@ func (i *instance) Search(ctx context.Context, req *tempopb.SearchRequest) (*tem
 		}
 
 		if api.IsTraceQLQuery(req) {
+			f := traceql.NewSpansetFetcherWrapperBoth(
+				func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansResponse, error) {
+					return b.Fetch(ctx, req, opts)
+				},
+				func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansOnlyResponse, error) {
+					return b.FetchSpans(ctx, req, opts)
+				},
+			)
 			// note: we are creating new engine for each wal block,
 			// and engine.ExecuteSearch is parsing the query for each block
-			resp, err = traceql.NewEngine().ExecuteSearch(ctx, req, traceql.NewSpansetFetcherWrapper(func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansResponse, error) {
-				return b.Fetch(ctx, req, opts)
-			}), i.overrides.UnsafeQueryHints(i.tenantID))
+			var searchOpts []traceql.CompileOption
+			if i.overrides.UnsafeQueryHints(i.tenantID) {
+				searchOpts = append(searchOpts, traceql.WithUnsafeHints(true))
+			}
+			for _, name := range req.SkipASTTransformations {
+				searchOpts = append(searchOpts, traceql.WithSkipOptimization(name))
+			}
+			resp, err = traceql.NewEngine().ExecuteSearch(ctx, req, f, searchOpts...)
 		} else {
 			resp, err = b.Search(ctx, req, opts)
 		}
@@ -306,7 +328,13 @@ func (i *instance) SearchTagsV2(ctx context.Context, req *tempopb.SearchTagsRequ
 	mc := collector.NewMetricsCollector()
 
 	engine := traceql.NewEngine()
-	query := traceql.ExtractMatchers(req.Query)
+	conditionGroups, err := traceql.ExtractConditionGroups(req.Query, i.overrides.MaxConditionGroupsPerTagQuery())
+	if err != nil {
+		if errors.Is(err, traceql.ErrMaxConditionGroupsPerTagQueryReached) {
+			return nil, status.Errorf(codes.InvalidArgument, "%s", err)
+		}
+		return nil, err
+	}
 
 	searchBlock := func(ctx context.Context, _ *backend.BlockMeta, b block) error {
 		if b == nil {
@@ -317,9 +345,9 @@ func (i *instance) SearchTagsV2(ctx context.Context, req *tempopb.SearchTagsRequ
 			return errComplete
 		}
 
-		// if the query is empty, use the old search
-		if traceql.IsEmptyQuery(query) {
-			err = b.SearchTags(ctx, attributeScope, func(t string, scope traceql.AttributeScope) {
+		// if the query is empty, use the unfiltered search
+		if len(conditionGroups) == 0 {
+			err := b.SearchTags(ctx, attributeScope, func(t string, scope traceql.AttributeScope) {
 				distinctValues.Collect(scope.String(), t)
 			}, mc.Add, common.DefaultSearchOptions())
 
@@ -335,7 +363,7 @@ func (i *instance) SearchTagsV2(ctx context.Context, req *tempopb.SearchTagsRequ
 			return b.FetchTagNames(ctx, req, cb, mc.Add, common.DefaultSearchOptions())
 		})
 
-		return engine.ExecuteTagNames(ctx, attributeScope, query, func(tag string, scope traceql.AttributeScope) bool {
+		return engine.ExecuteTagNames(ctx, attributeScope, conditionGroups, func(tag string, scope traceql.AttributeScope) bool {
 			return distinctValues.Collect(scope.String(), tag)
 		}, fetcher)
 	}
@@ -381,16 +409,13 @@ func (i *instance) SearchTagValues(ctx context.Context, req *tempopb.SearchTagVa
 	distinctValues := collector.NewDistinctString(maxBytesPerTagValues, limit, staleValueThreshold)
 	mc := collector.NewMetricsCollector()
 
-	var inspectedBlocks, maxBlocks int
+	var inspectedBlocks atomic.Int32
+	var maxBlocks int32
 	if limit := i.overrides.MaxBlocksPerTagValuesQuery(userID); limit > 0 {
-		maxBlocks = limit
+		maxBlocks = int32(limit)
 	}
 
 	search := func(ctx context.Context, _ *backend.BlockMeta, b block) error {
-		if maxBlocks > 0 && inspectedBlocks >= maxBlocks {
-			return nil
-		}
-
 		if b == nil {
 			return nil
 		}
@@ -399,8 +424,12 @@ func (i *instance) SearchTagValues(ctx context.Context, req *tempopb.SearchTagVa
 			return errComplete
 		}
 
-		inspectedBlocks++
-		err = b.SearchTagValues(ctx, tagName, distinctValues.Collect, mc.Add, common.DefaultSearchOptions())
+		// Atomically reserve a slot
+		if maxBlocks > 0 && inspectedBlocks.Inc() > maxBlocks {
+			return errComplete
+		}
+
+		err := b.SearchTagValues(ctx, tagName, distinctValues.Collect, mc.Add, common.DefaultSearchOptions())
 		if err != nil && !errors.Is(err, util.ErrUnsupported) {
 			return fmt.Errorf("unexpected error searching tag values (%s): %w", tagName, err)
 		}
@@ -458,20 +487,26 @@ func (i *instance) SearchTagValuesV2(ctx context.Context, req *tempopb.SearchTag
 		return &tempopb.SearchTagValuesV2Response{}, nil
 	}
 
-	query := traceql.ExtractMatchers(req.Query)
+	conditionGroups, err := traceql.ExtractConditionGroups(req.Query, i.overrides.MaxConditionGroupsPerTagQuery())
+	if err != nil {
+		if errors.Is(err, traceql.ErrMaxConditionGroupsPerTagQueryReached) {
+			return nil, status.Errorf(codes.InvalidArgument, "%s", err)
+		}
+		return nil, err
+	}
 	// cacheKey will be same for all blocks in a request so only compute it once
 	// NOTE: cacheKey tag name and query, so if we start respecting start and end, add them to the cacheKey
 	cacheKey := searchTagValuesV2CacheKey(req, limit, "cache_search_tagvaluesv2")
 
 	// helper functions as closures, to access local variables
-	search := func(ctx context.Context, s common.Searcher) error {
+	search := func(ctx context.Context, s common.Searcher, collect func(tempopb.TagValue) bool) error {
 		// note the interaction below with searchWithCache. if we ever return errComplete for reasons besides this we may need to adjust the error handling there
 		if maxBlocks > 0 && inspectedBlocks.Inc() > maxBlocks {
 			return errComplete
 		}
 
-		if traceql.IsEmptyQuery(query) {
-			return s.SearchTagValuesV2(ctx, tag, traceql.MakeCollectTagValueFunc(vCollector.Collect), mCollector.Add, common.DefaultSearchOptions())
+		if len(conditionGroups) == 0 {
+			return s.SearchTagValuesV2(ctx, tag, traceql.MakeCollectTagValueFunc(collect), mCollector.Add, common.DefaultSearchOptions())
 		}
 
 		// Otherwise, use the filtered search
@@ -479,14 +514,14 @@ func (i *instance) SearchTagValuesV2(ctx context.Context, req *tempopb.SearchTag
 			return s.FetchTagValues(ctx, req, cb, mCollector.Add, common.DefaultSearchOptions())
 		})
 
-		return engine.ExecuteTagValues(ctx, tag, query, traceql.MakeCollectTagValueFunc(vCollector.Collect), fetcher)
+		return engine.ExecuteTagValues(ctx, tag, conditionGroups, traceql.MakeCollectTagValueFunc(collect), fetcher, i.overrides.MaxConditionGroupsPerTagQuery())
 	}
 
 	searchWithCache := func(ctx context.Context, _ *backend.BlockMeta, b block) error {
 		// if not a local block, fall back to regular search
-		localB, ok := b.(*ingester.LocalBlock)
+		localB, ok := b.(*LocalBlock)
 		if !ok {
-			return search(ctx, b)
+			return search(ctx, b, vCollector.Collect)
 		}
 
 		// pulled from context to add attrs below
@@ -531,7 +566,7 @@ func (i *instance) SearchTagValuesV2(ctx context.Context, req *tempopb.SearchTag
 		// using local collector to collect values from the block and cache them.
 		localCol := collector.NewDistinctValue[tempopb.TagValue](limit, req.MaxTagValues, req.StaleValueThreshold, func(v tempopb.TagValue) int { return len(v.Type) + len(v.Value) })
 
-		if err := search(ctx, localB); err != nil { // note that errComplete could be returned here but it's ok to pass it up b/c it means no work was done and the localCol is invalid
+		if err := search(ctx, localB, localCol.Collect); err != nil { // note that errComplete could be returned here but it's ok to pass it up b/c it means no work was done and the localCol is invalid
 			return err
 		}
 
@@ -648,18 +683,43 @@ func (i *instance) QueryRange(ctx context.Context, req *tempopb.QueryRangeReques
 
 	e := traceql.NewEngine()
 
+	// Parse without optimizations to read hints; optimizations are applied by CompileMetricsQueryRange.
+	expr, err := traceql.ParseNoOptimizations(req.Query)
+	if err != nil {
+		return nil, fmt.Errorf("compiling query: %w", err)
+	}
+
+	var compileOpts []traceql.CompileOption
+
+	unsafe := i.overrides.UnsafeQueryHints(i.tenantID)
+	if unsafe {
+		compileOpts = append(compileOpts, traceql.WithUnsafeHints(true))
+	}
+	for _, name := range req.SkipASTTransformations {
+		compileOpts = append(compileOpts, traceql.WithSkipOptimization(name))
+	}
+
+	if v, ok := expr.Hints.GetFloat(traceql.HintTimeOverlapCutoff, unsafe); ok && v >= 0 && v <= 1.0 {
+		compileOpts = append(compileOpts, traceql.WithTimeOverlapCutoff(v))
+	} else {
+		compileOpts = append(compileOpts, traceql.WithTimeOverlapCutoff(i.Cfg.Metrics.TimeOverlapCutoff))
+	}
+
+	if p := i.overrides.MetricsSpanOnlyFetch(i.tenantID); p != nil {
+		compileOpts = append(compileOpts, traceql.WithSpanOnlyFetch(*p))
+	}
+
 	// Compile the raw version of the query for head and wal blocks
 	// These aren't cached and we put them all into the same evaluator
 	// for efficiency.
-	// TODO MRD look into how to propagate unsafe query hints.
-	rawEval, err := e.CompileMetricsQueryRange(req, i.Cfg.Metrics.TimeOverlapCutoff, false)
+	rawEval, err := e.CompileMetricsQueryRange(req, compileOpts...)
 	if err != nil {
 		return nil, err
 	}
 
 	// This is a summation version of the query for complete blocks
 	// which can be cached. They are timeseries, so they need the job-level evaluator.
-	jobEval, err := traceql.NewEngine().CompileMetricsQueryRangeNonRaw(req, traceql.AggregateModeSum)
+	jobEval, err := traceql.NewEngine().CompileMetricsQueryRangeNonRaw(req, traceql.AggregateModeSum, compileOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -667,18 +727,6 @@ func (i *instance) QueryRange(ctx context.Context, req *tempopb.QueryRangeReques
 	cutoff := time.Now().Add(-i.Cfg.CompleteBlockTimeout).Add(-timeBuffer)
 	if req.Start < uint64(cutoff.UnixNano()) {
 		return nil, fmt.Errorf("time range must be within last %v", i.Cfg.CompleteBlockTimeout)
-	}
-
-	expr, err := traceql.Parse(req.Query)
-	if err != nil {
-		return nil, fmt.Errorf("compiling query: %w", err)
-	}
-
-	unsafe := i.overrides.UnsafeQueryHints(i.tenantID)
-
-	timeOverlapCutoff := i.Cfg.Metrics.TimeOverlapCutoff
-	if v, ok := expr.Hints.GetFloat(traceql.HintTimeOverlapCutoff, unsafe); ok && v >= 0 && v <= 1.0 {
-		timeOverlapCutoff = v
 	}
 
 	maxSeries := int(req.MaxSeries)
@@ -698,8 +746,8 @@ func (i *instance) QueryRange(ctx context.Context, req *tempopb.QueryRangeReques
 			return nil
 		}
 
-		if localBlock, ok := b.(*ingester.LocalBlock); ok {
-			resp, err := i.queryRangeCompleteBlock(ctx, localBlock, *req, timeOverlapCutoff, unsafe)
+		if localBlock, ok := b.(*LocalBlock); ok {
+			resp, err := i.queryRangeCompleteBlock(ctx, localBlock, *req, compileOpts)
 			if err != nil {
 				return err
 			}
@@ -747,14 +795,18 @@ func (i *instance) queryRangeWALBlock(ctx context.Context, b common.WALBlock, ev
 	))
 	defer span.End()
 
-	fetcher := traceql.NewSpansetFetcherWrapper(func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansResponse, error) {
-		return b.Fetch(ctx, req, common.DefaultSearchOptions())
-	})
-
+	fetcher := traceql.NewSpansetFetcherWrapperBoth(
+		func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansResponse, error) {
+			return b.Fetch(ctx, req, common.DefaultSearchOptions())
+		},
+		func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansOnlyResponse, error) {
+			return b.FetchSpans(ctx, req, common.DefaultSearchOptions())
+		},
+	)
 	return eval.Do(ctx, fetcher, uint64(m.StartTime.UnixNano()), uint64(m.EndTime.UnixNano()), maxSeries)
 }
 
-func (i *instance) queryRangeCompleteBlock(ctx context.Context, b *ingester.LocalBlock, req tempopb.QueryRangeRequest, timeOverlapCutoff float64, unsafe bool) ([]*tempopb.TimeSeries, error) {
+func (i *instance) queryRangeCompleteBlock(ctx context.Context, b *LocalBlock, req tempopb.QueryRangeRequest, compileOpts []traceql.CompileOption) ([]*tempopb.TimeSeries, error) {
 	m := b.BlockMeta()
 	ctx, span := tracer.Start(ctx, "instance.QueryRange.CompleteBlock", oteltrace.WithAttributes(
 		attribute.String("block", m.BlockID.String()),
@@ -784,13 +836,18 @@ func (i *instance) queryRangeCompleteBlock(ctx context.Context, b *ingester.Loca
 	}
 
 	// Not in cache or not cacheable, so execute
-	eval, err := traceql.NewEngine().CompileMetricsQueryRange(&req, timeOverlapCutoff, unsafe)
+	eval, err := traceql.NewEngine().CompileMetricsQueryRange(&req, compileOpts...)
 	if err != nil {
 		return nil, err
 	}
-	f := traceql.NewSpansetFetcherWrapper(func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansResponse, error) {
-		return b.Fetch(ctx, req, common.DefaultSearchOptions())
-	})
+	f := traceql.NewSpansetFetcherWrapperBoth(
+		func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansResponse, error) {
+			return b.Fetch(ctx, req, common.DefaultSearchOptions())
+		},
+		func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansOnlyResponse, error) {
+			return b.FetchSpans(ctx, req, common.DefaultSearchOptions())
+		},
+	)
 	err = eval.Do(ctx, f, uint64(m.StartTime.UnixNano()), uint64(m.EndTime.UnixNano()), int(req.MaxSeries))
 	if err != nil {
 		return nil, err
@@ -884,8 +941,8 @@ func includeBlock(b *backend.BlockMeta, start, end time.Time) bool {
 func searchTagValuesV2CacheKey(req *tempopb.SearchTagValuesRequest, limit int, prefix string) string {
 	var cacheKey string
 	if req.Query != "" {
-		q := traceql.ExtractMatchers(req.Query)
-		if ast, err := traceql.Parse(q); err == nil {
+		q := traceql.NormalizeQuery(req.Query)
+		if ast, err := traceql.ParseNoOptimizations(q); err == nil {
 			// forces the query into a canonical form
 			cacheKey = ast.String()
 		} else {

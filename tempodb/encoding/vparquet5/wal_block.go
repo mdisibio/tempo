@@ -245,6 +245,7 @@ func (w *walBlockFlush) file(ctx context.Context) (*pageFile, error) {
 		parquet.SkipBloomFilters(true),
 		parquet.SkipPageIndex(true),
 		parquet.FileSchema(sch),
+		parquet.FileReadMode(parquet.ReadModeAsync),
 	}
 
 	pf, err := parquet.OpenFile(wr, size, o...)
@@ -257,8 +258,8 @@ func (w *walBlockFlush) file(ctx context.Context) (*pageFile, error) {
 	return f, nil
 }
 
-func (w *walBlockFlush) rowIterator() (*rowIterator, error) {
-	file, err := w.file(context.Background())
+func (w *walBlockFlush) rowIterator(ctx context.Context) (*rowIterator, error) {
+	file, err := w.file(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -280,18 +281,23 @@ func (b *pageFile) Close() error {
 	return b.osFile.Close()
 }
 
-type pageFileClosingIterator struct {
-	iter     *spansetIterator
+// pageFileClosingIterator wraps an iterator with a pageFile and ensures both are
+// always closed.
+type pageFileClosingIterator[T any] struct {
+	iter     traceql.CommonIterator[T]
 	pageFile *pageFile
 }
 
-var _ traceql.SpansetIterator = (*pageFileClosingIterator)(nil)
+var (
+	_ traceql.SpansetIterator = (*pageFileClosingIterator[*traceql.Spanset])(nil)
+	_ traceql.SpanIterator    = (*pageFileClosingIterator[traceql.Span])(nil)
+)
 
-func (b *pageFileClosingIterator) Next(ctx context.Context) (*traceql.Spanset, error) {
+func (b *pageFileClosingIterator[T]) Next(ctx context.Context) (T, error) {
 	return b.iter.Next(ctx)
 }
 
-func (b *pageFileClosingIterator) Close() {
+func (b *pageFileClosingIterator[T]) Close() {
 	b.iter.Close()
 	b.pageFile.Close()
 }
@@ -375,6 +381,8 @@ func (b *walBlock) AppendTrace(id common.ID, trace *tempopb.Trace, start, end ui
 	b.meta.ObjectAdded(start, end)
 	b.ids.Set(id, int64(b.ids.Len())) // Next row number
 
+	b.mtx.Lock()
+	defer b.mtx.Unlock()
 	b.unflushedSize += int64(estimateMarshalledSizeFromTrace(b.buffer))
 
 	return nil
@@ -453,8 +461,10 @@ func (b *walBlock) Flush() (err error) {
 	}
 
 	b.writeFlush(newWalBlockFlush(b.file.Name(), b.ids, b.meta.DedicatedColumns))
+	b.mtx.Lock()
 	b.flushedSize += sz
 	b.unflushedSize = 0
+	b.mtx.Unlock()
 	b.ids = common.NewIDMap[int64](b.ids.Len()) // Recreate new id map with same expected size
 
 	// Open next one
@@ -464,14 +474,17 @@ func (b *walBlock) Flush() (err error) {
 // DataLength returns estimated size of WAL files on disk. Used for
 // cutting WAL files by max size.
 func (b *walBlock) DataLength() uint64 {
+	b.mtx.Lock()
+	defer b.mtx.Unlock()
 	return uint64(b.flushedSize + b.unflushedSize)
 }
 
-func (b *walBlock) Iterator() (common.Iterator, error) {
-	bookmarks := make([]*bookmark[parquet.Row], 0, len(b.flushed))
+func (b *walBlock) Iterator(ctx context.Context) (common.Iterator, error) {
+	flushed := b.readFlushes()
+	bookmarks := make([]*bookmark[parquet.Row], 0, len(flushed))
 
-	for _, page := range b.flushed {
-		iter, err := page.rowIterator()
+	for _, page := range flushed {
+		iter, err := page.rowIterator(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("error creating iterator for %s: %w", page.path, err)
 		}
@@ -529,7 +542,7 @@ func (b *walBlock) FindTraceByID(ctx context.Context, id common.ID, opts common.
 	metrics := &tempopb.TraceByIDMetrics{}
 	trs := make([]*tempopb.Trace, 0)
 
-	for _, page := range b.flushed {
+	for _, page := range b.readFlushes() {
 		if rowNumber, ok := page.ids.Get(id); ok {
 			file, err := page.file(ctx)
 			if err != nil {
@@ -686,31 +699,29 @@ func (b *walBlock) Fetch(ctx context.Context, req traceql.FetchSpansRequest, _ c
 		return traceql.FetchSpansResponse{}, fmt.Errorf("conditions invalid: %w", err)
 	}
 
-	blockFlushes := b.readFlushes()
-	// collect page readers to compute totalBytesRead
-	readers := make([]*walReaderAt, 0, len(blockFlushes))
-	iters := make([]traceql.SpansetIterator, 0, len(blockFlushes))
+	var (
+		blockFlushes = b.readFlushes()
+		readers      = make([]*walReaderAt, 0, len(blockFlushes))
+		iters        = make([]traceql.CommonIterator[*traceql.Spanset], 0, len(blockFlushes))
+	)
+
 	for _, page := range blockFlushes {
 		file, err := page.file(ctx)
 		if err != nil {
 			return traceql.FetchSpansResponse{}, fmt.Errorf("error opening file %s: %w", page.path, err)
 		}
 
-		pf := file.parquetFile
-
-		iter, err := fetch(ctx, req, pf, pf.RowGroups(), b.meta.DedicatedColumns)
+		iter, err := fetch(ctx, req, file.parquetFile, file.parquetFile.RowGroups(), b.meta.DedicatedColumns)
 		if err != nil {
 			return traceql.FetchSpansResponse{}, fmt.Errorf("creating fetch iter: %w", err)
 		}
 
-		wrappedIterator := &pageFileClosingIterator{iter: iter, pageFile: file}
-		iters = append(iters, wrappedIterator)
+		iters = append(iters, &pageFileClosingIterator[*traceql.Spanset]{iter: iter, pageFile: file})
 		readers = append(readers, file.r)
 	}
 
-	// combine iters?
 	return traceql.FetchSpansResponse{
-		Results: &mergeSpansetIterator{
+		Results: &mergeIterator[*traceql.Spanset]{
 			iters: iters,
 		},
 		// FIXME: can this be simplified with the common.MetadataCallback?? and Metrics Collector??
@@ -725,22 +736,64 @@ func (b *walBlock) Fetch(ctx context.Context, req traceql.FetchSpansRequest, _ c
 	}, nil
 }
 
+func (b *walBlock) FetchSpans(ctx context.Context, req traceql.FetchSpansRequest, _ common.SearchOptions) (traceql.FetchSpansOnlyResponse, error) {
+	ctx, span := tracer.Start(ctx, "walBlock.FetchSpans")
+	defer span.End()
+
+	if err := checkConditions(req.Conditions); err != nil {
+		return traceql.FetchSpansOnlyResponse{}, fmt.Errorf("conditions invalid: %w", err)
+	}
+
+	var (
+		blockFlushes = b.readFlushes()
+		readers      = make([]*walReaderAt, 0, len(blockFlushes))
+		iters        = make([]traceql.CommonIterator[traceql.Span], 0, len(blockFlushes))
+	)
+	for _, page := range blockFlushes {
+		file, err := page.file(ctx)
+		if err != nil {
+			return traceql.FetchSpansOnlyResponse{}, fmt.Errorf("error opening file %s: %w", page.path, err)
+		}
+		iter, err := fetchSpans(ctx, req, file.parquetFile, file.parquetFile.RowGroups(), b.meta.DedicatedColumns)
+		if err != nil {
+			return traceql.FetchSpansOnlyResponse{}, fmt.Errorf("creating fetch spans iter: %w", err)
+		}
+		iters = append(iters, &pageFileClosingIterator[traceql.Span]{iter: iter, pageFile: file})
+		readers = append(readers, file.r)
+	}
+
+	return traceql.FetchSpansOnlyResponse{
+		Results: &mergeIterator[traceql.Span]{iters: iters},
+		Bytes: func() uint64 {
+			var totalBytesRead uint64
+			for _, r := range readers {
+				totalBytesRead += r.BytesRead()
+			}
+			return totalBytesRead
+		},
+	}, nil
+}
+
 func (b *walBlock) FetchTagValues(ctx context.Context, req traceql.FetchTagValuesRequest, cb traceql.FetchTagValuesCallback, mcb common.MetricsCallback, opts common.SearchOptions) error {
 	ctx, span := tracer.Start(ctx, "walBlock.FetchTagValues")
 	defer span.End()
 
-	err := checkConditions(req.Conditions)
-	if err != nil {
-		return fmt.Errorf("conditions invalid: %w", err)
-	}
-
-	_, mingledConditions, err := categorizeConditions(req.Conditions)
-	if err != nil {
-		return err
-	}
-
-	if len(req.Conditions) <= 1 || mingledConditions { // Last check. No conditions, use old path. It's much faster.
+	if len(req.ConditionGroups) == 0 {
 		return b.SearchTagValuesV2(ctx, req.TagName, common.TagValuesCallbackV2(cb), mcb, common.DefaultSearchOptions())
+	}
+
+	// Validate all condition groups upfront before opening any files.
+	for _, condGroup := range req.ConditionGroups {
+		if err := checkConditions(condGroup); err != nil {
+			return fmt.Errorf("conditions invalid: %w", err)
+		}
+		_, mingledConditions, err := categorizeConditions(condGroup)
+		if err != nil {
+			return err
+		}
+		if len(req.ConditionGroups) == 1 && len(condGroup) <= 1 || mingledConditions { // Last check. No conditions, use old path. It's much faster.
+			return b.SearchTagValuesV2(ctx, req.TagName, common.TagValuesCallbackV2(cb), mcb, common.DefaultSearchOptions())
+		}
 	}
 
 	// track sent tag values to avoid duplicates. this is a perf improvement
@@ -751,53 +804,65 @@ func (b *walBlock) FetchTagValues(ctx context.Context, req traceql.FetchTagValue
 		return ok
 	}
 
+	// Open each WAL page file once and run all condition groups against it to avoid
+	// reopening the file once per condition group.
 	blockFlushes := b.readFlushes()
 	for _, page := range blockFlushes {
-		file, err := page.file(ctx)
-		if err != nil {
-			return fmt.Errorf("error opening file %s: %w", page.path, err)
-		}
-		defer file.Close()
-
-		pf := file.parquetFile
-
-		tr := tagRequest{
-			conditions:     req.Conditions,
-			tag:            req.TagName,
-			existsTagValue: existsTagValue,
-		}
-
-		iter, err := autocompleteIter(ctx, tr, pf, opts, b.meta.DedicatedColumns)
-		if err != nil {
-			return fmt.Errorf("creating fetch iter: %w", err)
-		}
-
-		for {
-			// Exhaust the iterator
-			res, err := iter.Next()
+		done, err := func() (bool, error) {
+			file, err := page.file(ctx)
 			if err != nil {
-				iter.Close()
-				return fmt.Errorf("iterating spans in walBlock: %w", err)
+				return false, fmt.Errorf("error opening file %s: %w", page.path, err)
 			}
-			if res == nil {
-				break
-			}
+			defer file.Close()
 
-			for _, oe := range res.OtherEntries {
-				v := oe.Value.(traceql.Static)
-				sentVals[v.MapKey()] = struct{}{}
-				if cb(v) {
-					iter.Close()
-					mcb(file.r.BytesRead()) // record bytes read
-					return nil              // We have enough values
+			pf := file.parquetFile
+
+			for _, condGroup := range req.ConditionGroups {
+				tr := tagRequest{
+					conditions:     condGroup,
+					tag:            req.TagName,
+					existsTagValue: existsTagValue,
 				}
+
+				iter, err := autocompleteIter(ctx, tr, pf, opts, b.meta.DedicatedColumns)
+				if err != nil {
+					return false, fmt.Errorf("creating fetch iter: %w", err)
+				}
+
+				for {
+					// Exhaust the iterator
+					res, err := iter.Next()
+					if err != nil {
+						iter.Close()
+						return false, fmt.Errorf("iterating spans in walBlock: %w", err)
+					}
+					if res == nil {
+						break
+					}
+
+					for _, oe := range res.OtherEntries {
+						v := oe.Value.(traceql.Static)
+						sentVals[v.MapKey()] = struct{}{}
+						if cb(v) {
+							iter.Close()
+							mcb(file.r.BytesRead()) // record bytes read
+							return true, nil        // We have enough values
+						}
+					}
+				}
+				iter.Close()
 			}
+			mcb(file.r.BytesRead()) // record bytes read
+			return false, nil
+		}()
+		if err != nil {
+			return err
 		}
-		iter.Close()
-		mcb(file.r.BytesRead()) // record bytes read
+		if done {
+			return nil
+		}
 	}
 
-	// combine iters?
 	return nil
 }
 
@@ -805,20 +870,26 @@ func (b *walBlock) FetchTagNames(ctx context.Context, req traceql.FetchTagsReque
 	ctx, span := tracer.Start(ctx, "walBlock.FetchTagNames")
 	defer span.End()
 
-	err := checkConditions(req.Conditions)
-	if err != nil {
-		return fmt.Errorf("conditions invalid: %w", err)
-	}
-
-	_, mingledConditions, err := categorizeConditions(req.Conditions)
-	if err != nil {
-		return err
-	}
-
-	if len(req.Conditions) < 1 || mingledConditions {
+	if len(req.ConditionGroups) == 0 {
 		return b.SearchTags(ctx, req.Scope, func(t string, scope traceql.AttributeScope) {
 			cb(t, scope)
 		}, mcb, opts)
+	}
+
+	// Validate all condition groups upfront before opening any files.
+	for _, condGroup := range req.ConditionGroups {
+		if err := checkConditions(condGroup); err != nil {
+			return fmt.Errorf("conditions invalid: %w", err)
+		}
+		_, mingledConditions, err := categorizeConditions(condGroup)
+		if err != nil {
+			return err
+		}
+		if len(req.ConditionGroups) == 1 && len(condGroup) < 1 || mingledConditions {
+			return b.SearchTags(ctx, req.Scope, func(t string, scope traceql.AttributeScope) {
+				cb(t, scope)
+			}, mcb, opts)
+		}
 	}
 
 	// track sent tag names to avoid duplicates. this is a perf improvement
@@ -828,53 +899,65 @@ func (b *walBlock) FetchTagNames(ctx context.Context, req traceql.FetchTagsReque
 		return ok
 	}
 
+	// Open each WAL page file once and run all condition groups against it, then emit
+	// special columns once per file rather than once per condGroup per file.
 	blockFlushes := b.readFlushes()
 	for _, page := range blockFlushes {
-		file, err := page.file(ctx)
-		if err != nil {
-			return fmt.Errorf("error opening file %s: %w", page.path, err)
-		}
-		defer file.Close()
-
-		tr := tagRequest{
-			conditions:    req.Conditions,
-			scope:         req.Scope,
-			existsTagName: existsTagName,
-		}
-
-		iter, err := autocompleteIter(ctx, tr, file.parquetFile, opts, b.meta.DedicatedColumns)
-		if err != nil {
-			return fmt.Errorf("creating fetch iter: %w", err)
-		}
-
-		for {
-			// Exhaust the iterator
-			res, err := iter.Next()
+		done, err := func() (bool, error) {
+			file, err := page.file(ctx)
 			if err != nil {
-				iter.Close()
-				return err
+				return false, fmt.Errorf("error opening file %s: %w", page.path, err)
 			}
-			if res == nil {
-				break
-			}
-			for _, oe := range res.OtherEntries {
-				scope := oe.Value.(traceql.AttributeScope)
-				sentKeys[tagNameKey{name: oe.Key, scope: scope}] = struct{}{}
-				if cb(oe.Key, scope) {
-					iter.Close()
-					mcb(file.r.BytesRead()) // record bytes read
-					return nil              // We have enough values
-				}
-			}
-		}
-		iter.Close()
-		mcb(file.r.BytesRead()) // record bytes read
+			defer file.Close()
 
-		// add well known
-		tagNamesForSpecialColumns(req.Scope, file.parquetFile, b.meta.DedicatedColumns, cb)
+			for _, condGroup := range req.ConditionGroups {
+				tr := tagRequest{
+					conditions:    condGroup,
+					scope:         req.Scope,
+					existsTagName: existsTagName,
+				}
+
+				iter, err := autocompleteIter(ctx, tr, file.parquetFile, opts, b.meta.DedicatedColumns)
+				if err != nil {
+					return false, fmt.Errorf("creating fetch iter: %w", err)
+				}
+
+				for {
+					// Exhaust the iterator
+					res, err := iter.Next()
+					if err != nil {
+						iter.Close()
+						return false, err
+					}
+					if res == nil {
+						break
+					}
+					for _, oe := range res.OtherEntries {
+						scope := oe.Value.(traceql.AttributeScope)
+						sentKeys[tagNameKey{name: oe.Key, scope: scope}] = struct{}{}
+						if cb(oe.Key, scope) {
+							iter.Close()
+							mcb(file.r.BytesRead()) // record bytes read
+							return true, nil        // We have enough values
+						}
+					}
+				}
+				iter.Close()
+			}
+
+			// Add well known columns once per file, not once per condition group.
+			tagNamesForSpecialColumns(req.Scope, file.parquetFile, b.meta.DedicatedColumns, cb)
+			mcb(file.r.BytesRead()) // record bytes read once per file; BytesRead() is cumulative
+			return false, nil
+		}()
+		if err != nil {
+			return err
+		}
+		if done {
+			return nil
+		}
 	}
 
-	// combine iters?
 	return nil
 }
 
@@ -1019,4 +1102,39 @@ func (i *commonIterator) NextRow(ctx context.Context) (common.ID, parquet.Row, e
 
 func (i *commonIterator) Close() {
 	i.iter.Close()
+}
+
+// mergeIterator iterates through the list of WAL block flush pages and iterates them in order.
+type mergeIterator[T comparable] struct {
+	iters []traceql.CommonIterator[T]
+}
+
+var (
+	_ traceql.SpansetIterator = (*mergeIterator[*traceql.Spanset])(nil)
+	_ traceql.SpanIterator    = (*mergeIterator[traceql.Span])(nil)
+)
+
+func (i *mergeIterator[T]) Next(ctx context.Context) (T, error) {
+	var zero T
+	for len(i.iters) > 0 {
+		res, err := i.iters[0].Next(ctx)
+		if err != nil {
+			return zero, err
+		}
+		if res == zero { // nil when exhausted (both Span and *Spanset use nil)
+			// This iter is exhausted, pop it
+			i.iters[0].Close()
+			i.iters = i.iters[1:]
+			continue
+		}
+		return res, nil
+	}
+	return zero, nil
+}
+
+func (i *mergeIterator[T]) Close() {
+	// Close any outstanding iters
+	for _, iter := range i.iters {
+		iter.Close()
+	}
 }

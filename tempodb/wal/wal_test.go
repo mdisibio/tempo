@@ -178,7 +178,7 @@ func testIterator(t *testing.T, e encoding.VersionedEncoding) {
 	runWALTest(t, e.Version(), func(ids [][]byte, objs []*tempopb.Trace, block common.WALBlock) {
 		ctx := context.Background()
 
-		iterator, err := block.Iterator()
+		iterator, err := block.Iterator(ctx)
 		require.NoError(t, err)
 		defer iterator.Close()
 
@@ -266,11 +266,8 @@ func testFetch(t *testing.T, e encoding.VersionedEncoding) {
 			require.NotEmpty(t, v)
 
 			query := fmt.Sprintf("{ .%s = \"%s\" }", k, v)
+
 			resp, err := block.Fetch(ctx, traceql.MustExtractFetchSpansRequestWithMetadata(query), common.DefaultSearchOptions())
-			// not all blocks support fetch
-			if errors.Is(err, util.ErrUnsupported) {
-				return
-			}
 			require.NoError(t, err)
 
 			// grab the first result

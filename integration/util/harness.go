@@ -237,14 +237,19 @@ func runTempoHarness(t *testing.T, harnessCfg TestHarnessConfig, requestedBacken
 		return
 	}
 
+	components := harnessCfg.Components
+	if harnessCfg.DeploymentMode == DeploymentModeSingleBinary {
+		components &^= componentsKafka | componentsBlockBuilder
+	}
+
 	// Start Kafka
 	//   todo: should we add a field to reference kafka on the harness? not needed atm. maybe to test failure states by stopping it?
-	if harnessCfg.Components&componentsKafka != 0 {
+	if components&componentsKafka != 0 {
 		kafka := e2edb.NewKafka()
 		require.NoError(t, s.StartAndWaitReady(kafka), "failed to start Kafka")
 	}
 
-	if harnessCfg.Components&componentsPrometheus != 0 {
+	if components&componentsPrometheus != 0 {
 		prometheus := newPrometheus()
 		require.NoError(t, s.StartAndWaitReady(prometheus), "failed to start prometheus")
 		harness.Services[ServicePrometheus] = prometheus
@@ -510,7 +515,7 @@ func (h *TempoHarness) startMicroservices(t *testing.T, config TestHarnessConfig
 	}
 
 	if config.Components&componentsBackendSchedulerWorker != 0 {
-		scheduler := NewTempoService("backend-scheduler", "backend-scheduler", readinessProbe, nil)
+		scheduler := NewTempoService("backend-scheduler", "backend-scheduler", readinessProbe, []int{9095})
 		worker := NewTempoService("backend-worker", "backend-worker", readinessProbe, nil)
 		h.Services[ServiceBackendScheduler] = scheduler
 		h.Services[ServiceBackendWorker] = worker

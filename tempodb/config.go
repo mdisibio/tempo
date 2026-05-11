@@ -142,10 +142,10 @@ func (cfg *CompactorConfig) RegisterFlagsAndApplyDefaults(prefix string, f *flag
 	cfg.CompactedBlockRetention = time.Hour
 	cfg.RetentionConcurrency = DefaultRetentionConcurrency
 
-	f.DurationVar(&cfg.BlockRetention, util.PrefixConfig(prefix, "compaction.block-retention"), 14*24*time.Hour, "Duration to keep blocks/traces.")
-	f.IntVar(&cfg.MaxCompactionObjects, util.PrefixConfig(prefix, "compaction.max-objects-per-block"), 6000000, "Maximum number of traces in a compacted block.")
-	f.Uint64Var(&cfg.MaxBlockBytes, util.PrefixConfig(prefix, "compaction.max-block-bytes"), 100*1024*1024*1024 /* 100GB */, "Maximum size of a compacted block.")
-	f.DurationVar(&cfg.MaxCompactionRange, util.PrefixConfig(prefix, "compaction.compaction-window"), time.Hour, "Maximum time window across which to compact blocks.")
+	f.DurationVar(&cfg.BlockRetention, util.PrefixConfig(prefix, "block-retention"), 14*24*time.Hour, "Duration to keep blocks/traces.")
+	f.IntVar(&cfg.MaxCompactionObjects, util.PrefixConfig(prefix, "max-objects-per-block"), 6000000, "Maximum number of traces in a compacted block.")
+	f.Uint64Var(&cfg.MaxBlockBytes, util.PrefixConfig(prefix, "max-block-bytes"), 100*1024*1024*1024 /* 100GB */, "Maximum size of a compacted block.")
+	f.DurationVar(&cfg.MaxCompactionRange, util.PrefixConfig(prefix, "compaction-window"), time.Hour, "Maximum time window across which to compact blocks.")
 }
 
 func (cfg *CompactorConfig) validate() error {
@@ -169,10 +169,8 @@ func validateConfig(cfg *Config) error {
 		return errors.New("block config should be non-nil")
 	}
 
-	// if the wal version is unspecified default to the block version
-	if cfg.WAL.Version == "" {
-		cfg.WAL.Version = cfg.Block.Version
-	}
+	// WAL version always matches the block version
+	cfg.WAL.Version = cfg.Block.Version
 
 	err := cfg.WAL.Validate()
 	if err != nil {

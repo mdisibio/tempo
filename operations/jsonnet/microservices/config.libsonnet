@@ -82,6 +82,11 @@
       ephemeral_storage_request_size: error 'Must specify a generator ephemeral_storage_request size',
       ephemeral_storage_limit_size: error 'Must specify a metrics generator ephemeral_storage_limit size',
       replicas: 0,
+      // deployment_max_unavailable: max unavailable during rolling update (default 1).
+      // Accepts an integer or a percentage string, e.g. deployment_max_unavailable: '25%'.
+      // Rolling (1): 2 rebalances per pod. All-at-once (replicas): fewer total rebalances;
+      // first new pod briefly holds all partitions until others rejoin.
+      deployment_max_unavailable: 1,
       resources: {
         requests: {
           cpu: '500m',
@@ -95,6 +100,7 @@
     },
     block_builder: {
       replicas: 0,
+      data_volume_size: '5Gi',
       resources: {
         requests: {
           cpu: '500m',
@@ -172,20 +178,25 @@
       tempoMetricsBackoffDuration: '0s',  // TraceQL Metrics checks disabled
       tempoLongWriteBackoffDuration: '50s',
     },
-    ballast_size_mbs: '1024',
     port: 3200,
     http_api_prefix: '',
     gossip_ring_port: 7946,
     backend: error 'Must specify a backend',  // gcs|s3
     bucket: error 'Must specify a bucket',
+    kafka_address: error 'Must specify a kafka address',
+    kafka_topic: error 'Must specify a kafka topic',
 
     overrides_configmap_name: 'tempo-overrides',
     overrides+:: {
       super_user: {
-        max_traces_per_user: 100000,
-        ingestion_rate_limit_bytes: 200e5,  // ~20MB per sec
-        ingestion_burst_size_bytes: 200e5,  // ~20MB
-        max_bytes_per_trace: 300e5,  // ~30MB
+        ingestion: {
+          max_traces_per_user: 100000,
+          rate_limit_bytes: 200e5,  // ~20MB per sec
+          burst_size_bytes: 200e5,  // ~20MB
+        },
+        global: {
+          max_bytes_per_trace: 300e5,  // ~30MB
+        },
       },
     },
   },

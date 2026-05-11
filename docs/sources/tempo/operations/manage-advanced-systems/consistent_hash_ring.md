@@ -13,7 +13,7 @@ Tempo uses the [Consistent Hash Ring](https://cortexmetrics.io/docs/architecture
 By default, the ring is gossiped between all Tempo components.
 However, it can be configured to use [Consul](https://www.consul.io/) or [Etcd](https://etcd.io/), if desired.
 
-There are three consistent hash rings: distributor, ingester, and metrics-generator.
+Tempo uses several consistent hash rings.
 Each hash ring exists for a distinct reason.
 
 ## Distributor
@@ -26,27 +26,41 @@ Unless you are running with limits, this ring does not impact Tempo operation.
 
 This ring is only used when `global` rate limits are used. The distributors use it to count the other active distributors. Incoming traffic is assumed to be evenly spread across all distributors and `(global_rate_limit / # of distributors)` is used to rate limit locally.
 
-## Ingester
+## Live-store (partition ring)
 
-**Participants:** Ingesters
+**Participants:** Live-stores
 
-**Used by:** Distributors, Queriers
+**Used by:** Distributors, Queriers, Block-builders
 
-This ring is used by the distributors to load balance traffic into the ingesters. When spans are received the trace id is hashed and they are sent to the appropriate ingesters based on token ownership in the ring. Queriers also use this ring to find the ingesters for querying recent traces.
+The partition ring tracks which Tempo partitions are active and which live-stores own them. Distributors use this ring to determine which partitions to write to when sending data to Kafka. Queriers use it to find the live-stores for querying recent traces. Block-builders use it to determine which partitions to consume from.
 
-## Metrics-generator
+## Backend-worker
+
+**Participants:** Backend-workers
+
+**Used by:** Backend-workers
+
+The backend-worker ring shards tenant index writing across backend-workers. This ring is only active when the backend-worker is configured with an external KV store for ring membership.
+
+## Metrics-generator (partition ring)
 
 **Participants:** Metrics-generators
 
-**Used by:** Distributors, Queriers
+**Used by:** Metrics-generators
 
-This ring is used by distributors to load balance traffic to the metrics-generators. When spans are received, the trace ID is hashed, and the traces are sent to the appropriate metrics-generators based on token ownership in the ring.
-Queriers also use this ring to generate TraceQL metrics from recent traces.
+In microservices mode, the metrics-generator partition ring tracks which generator instances own which partitions. This ring is only active when `metrics_generator.ring_mode` is set to `generator`.
 
 ## Interacting with the rings
 
-Web pages are available at the following endpoints. They show every ring member, their tokens and includes the ability to "Forget" a ring member. "Forgetting" is useful when a
-ring member leaves the ring without properly shutting down, and therefore leaves its tokens in the ring.
+Web pages are available at the following endpoints. They show every ring member, their tokens, and include the ability to "Forget" a ring member. "Forgetting" is useful when a ring member leaves the ring without properly shutting down, and therefore leaves its tokens in the ring.
+
+To access a ring page, send a GET request to the Tempo HTTP API. By default, Tempo listens on port `3200` (configured with `server.http_listen_port`). For example:
+
+```
+http://<tempo-host>:3200/live-store/ring
+```
+
+In single-binary mode, any enabled ring endpoints are available on the same host. In microservices mode, each endpoint is available on the component listed in the **Available on** field.
 
 ### Distributor
 
@@ -54,23 +68,49 @@ ring member leaves the ring without properly shutting down, and therefore leaves
 
 **Path:** `/distributor/ring`
 
-Unhealthy distributors have little impact but should be forgotten to reduce cost of maintaining the ring .
+{{< admonition type="note" >}}
+This endpoint is only available when Tempo is configured with [the global ingestion rate strategy](https://grafana.com/docs/tempo/<TEMPO_VERSION>/configuration/#ingestion-rate-strategy).
+{{< /admonition >}}
 
-### Ingester
+Unhealthy distributors have little impact but should be forgotten to reduce the cost of maintaining the ring.
 
-**Available on:** Distributors
+### Live-store (partition ring)
 
-**Path:** `/ingester/ring`
+**Available on:** Distributors, Queriers, Live-stores
 
-Unhealthy ingesters will cause writes to fail. If the ingester is really gone, forget it immediately.
+**Path:** `/partition-ring`
 
-### Metrics-generators
+The partition ring shows partition ownership across live-stores. Unhealthy live-stores may cause recent data queries to degrade.
 
-**Available on:** Distributors
+### Live-store
 
-**Path:** `/metrics-generator/ring`
+**Available on:** Distributors, Queriers, Live-stores
 
-Unhealthy metrics-generators will cause writes to fail. If the metrics-generator is really gone, forget it immediately.
+**Path:** `/live-store/ring`
+
+### Backend-worker
+
+**Available on:** Backend-workers
+
+**Path:** `/backend-worker/ring`
+
+{{< admonition type="note" >}}
+This endpoint is only available when `backend_worker.ring.kvstore.store` is set to a non-empty value other than `inmemory` (for example, `memberlist`, `consul`, or `etcd`).
+{{< /admonition >}}
+
+The backend-worker ring page shows how tenant index writing is distributed across workers. Forget unhealthy workers so that sharding redistributes correctly.
+
+### Metrics-generator (partition ring)
+
+**Available on:** Metrics-generators
+
+**Path:** `/partition/ring`
+
+{{< admonition type="note" >}}
+This endpoint is only available in microservices mode when `metrics_generator.ring_mode` is set to `generator`.
+{{< /admonition >}}
+
+The metrics-generator partition ring shows partition ownership across generator instances.
 
 ## Configuring the rings
 

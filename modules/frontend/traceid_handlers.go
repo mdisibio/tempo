@@ -11,6 +11,7 @@ import (
 	"github.com/grafana/tempo/modules/overrides"
 	"github.com/grafana/tempo/pkg/api"
 	"github.com/grafana/tempo/pkg/tempopb"
+	"github.com/grafana/tempo/pkg/util/tracing"
 )
 
 // newTraceIDHandler creates a http.handler for trace by id requests
@@ -30,7 +31,7 @@ func newTraceIDHandler(cfg Config, next pipeline.AsyncRoundTripper[combiner.Pipe
 		}
 
 		// validate start and end parameter
-		_, _, _, _, _, _, reqErr := api.ValidateAndSanitizeRequest(req)
+		_, _, _, _, _, reqErr := api.ParseTraceByIDRequest(req)
 		if reqErr != nil {
 			return httpInvalidRequest(reqErr), nil
 		}
@@ -68,9 +69,11 @@ func newTraceIDHandler(cfg Config, next pipeline.AsyncRoundTripper[combiner.Pipe
 		}
 		postSLOHook(resp, tenant, inspectBytes, elapsed, err)
 
+		traceID, _ := tracing.ExtractTraceID(req.Context())
 		level.Info(logger).Log(
 			"msg", "trace id response",
 			"tenant", tenant,
+			"traceID", traceID,
 			"path", req.URL.Path,
 			"duration_seconds", elapsed.Seconds(),
 			"inspected_bytes", inspectBytes,
@@ -98,7 +101,7 @@ func newTraceIDV2Handler(cfg Config, next pipeline.AsyncRoundTripper[combiner.Pi
 		}
 
 		// validate start and end parameter
-		_, _, _, _, _, _, reqErr := api.ValidateAndSanitizeRequest(req)
+		_, _, _, _, _, reqErr := api.ParseTraceByIDRequest(req)
 		if reqErr != nil {
 			return httpInvalidRequest(reqErr), nil
 		}
@@ -138,9 +141,11 @@ func newTraceIDV2Handler(cfg Config, next pipeline.AsyncRoundTripper[combiner.Pi
 
 		postSLOHook(resp, tenant, bytesProcessed, elapsed, err)
 
+		traceID, _ := tracing.ExtractTraceID(req.Context())
 		level.Info(logger).Log(
 			"msg", "trace id response",
 			"tenant", tenant,
+			"traceID", traceID,
 			"path", req.URL.Path,
 			"inspected_bytes", bytesProcessed,
 			"request_throughput", float64(bytesProcessed)/elapsed.Seconds(),

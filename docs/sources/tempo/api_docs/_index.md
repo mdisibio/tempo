@@ -43,18 +43,16 @@ For externally supported gRPC API, [refer to Tempo gRPC API](#tempo-grpc-api).
 | [TraceQL Metrics (instant)](#instant)                                                 | Query-frontend                            | HTTP | `GET /api/metrics/query`                                  |
 | [Query Echo Endpoint](#query-echo-endpoint)                                           | Query-frontend                            | HTTP | `GET /api/echo`                                           |
 | [Overrides API](#overrides-api)                                                       | Query-frontend                            | HTTP | `GET,POST,PATCH,DELETE /api/overrides`                    |
-| Memberlist                                                                            | Distributor, Ingester, Querier            | HTTP | `GET /memberlist`                                         |
-| [Flush](#flush)                                                                       | Ingester                                  | HTTP | `GET,POST /flush`                                         |
-| [Shutdown](#shutdown)                                                                 | Ingester                                  | HTTP | `GET,POST /shutdown`                                      |
-| [Prepare partition downscale](#prepare-partition-downscale)                           | Ingester                                  | HTTP | `GET,POST,DELETE /ingester/prepare-partition-downscale`   |
+| Memberlist                                                                            | Distributor, Querier, Live store          | HTTP | `GET /memberlist`                                         |
 | [Prepare live store partition downscale](#prepare-live-store-partition-downscale)     | Live store                                | HTTP | `GET,POST,DELETE /live-store/prepare-partition-downscale` |
-| [Prepare live store downscale](#prepare-live-store-downscale)                         | Live store                                | HTTP | `POST,DELETE /live-store/prepare-downscale`               |
+| [Prepare live store downscale](#prepare-live-store-downscale)                         | Live store                                | HTTP | `GET,POST,DELETE /live-store/prepare-downscale`           |
 | [Usage Metrics](#usage-metrics)                                                       | Distributor                               | HTTP | `GET /usage_metrics`                                      |
 | [Distributor ring status](#distributor-ring-status) (\*)                              | Distributor                               | HTTP | `GET /distributor/ring`                                   |
-| [Ingesters ring status](#ingesters-ring-status)                                       | Distributor, Querier                      | HTTP | `GET /ingester/ring`                                      |
-| [Metrics-generator ring status](#metrics-generator-ring-status) (\*)                  | Distributor                               | HTTP | `GET /metrics-generator/ring`                             |
+| [Live-store ring status](#live-store-ring-status)                                     | Distributor, Querier                      | HTTP | `GET /live-store/ring`                                    |
+| [Partition ring status](#partition-ring-status)                                       | Distributor, Querier, Live store          | HTTP | `GET /partition-ring`                                     |
 | [Status](#status)                                                                     | Status                                    | HTTP | `GET /status`                                             |
 | [List build information](#list-build-information)                                     | Status                                    | HTTP | `GET /api/status/buildinfo`                               |
+| [Backend scheduler job status](#backend-scheduler-job-status)                        | Backend scheduler                         | HTTP | `GET /status/backendscheduler`                            |
 | [MCP Server](https://grafana.com/docs/tempo/<TEMPO_VERSION>/api_docs/mcp-server) (\*) | MCP                                       |      | `/api/mcp`                                                |
 
 _(\*) This endpoint isn't always available, check the specific section for more details._
@@ -146,7 +144,8 @@ GET /querier/api/traces/<traceid>?mode=xxxx&blockStart=0000&blockEnd=FFFF&start=
 Parameters:
 
 - `mode = (blocks|ingesters|all)`
-  Specifies whether the querier should look for the trace in blocks, ingesters or both (all).
+  Specifies whether the querier should look for the trace in blocks, live stores, or both (all).
+  The `ingesters` mode queries live stores for recent data.
   Default = `all`
 - `blockStart = (GUID)`
   Specifies the blockID start boundary. If specified, the querier only searches blocks with IDs > blockStart.
@@ -194,7 +193,8 @@ GET /querier/api/v2/traces/<traceid>?mode=xxxx&blockStart=0000&blockEnd=FFFF&sta
 Parameters:
 
 - `mode = (blocks|ingesters|all)`
-  Specifies whether the querier should look for the trace in blocks, ingesters or both (all).
+  Specifies whether the querier should look for the trace in blocks, live stores, or both (all).
+  The `ingesters` mode queries live stores for recent data.
   Default = `all`
 - `blockStart = (GUID)`
   Specifies the blockID start boundary. If specified, the querier only searches blocks with IDs > blockStart.
@@ -220,8 +220,7 @@ Other formats can be requested using the `Accept` header:
 
 ### Search
 
-The Tempo Search API finds traces based on span and process attributes (tags and values). Note that search functionality is **not** available on
-[v2 blocks](https://grafana.com/docs/tempo/<TEMPO_VERSION>/configuration/parquet/#choose-a-different-block-format).
+The Tempo Search API finds traces based on span and process attributes (tags and values).
 
 When performing a search, Tempo does a massively parallel search over the given time range, and takes the first N results. Even identical searches differs due to things like machine load and network latency. TraceQL follows the same behavior.
 
@@ -256,7 +255,7 @@ The URL query parameters support the following values:
   Optional. Along with `end` define a time range from which traces should be returned.
 - `end = (unix epoch seconds)`
   Optional. Along with `start`, define a time range from which traces should be returned. Providing both `start` and `end` changes the way that Tempo searches.
-  If the parameters aren't provided, then Tempo searches the recent trace data stored in the ingesters. If the parameters are provided, it searches the backend as well.
+  If the parameters aren't provided, then Tempo searches the recent trace data stored in the live store. If the parameters are provided, it searches the backend as well.
 - `spss = (integer)`
   Optional. Limit the number of spans per span-set. Default value is 3.
 
@@ -336,7 +335,9 @@ curl -G -s http://localhost:3200/api/search --data-urlencode 'tags=service.name=
 
 ### Search tags
 
-Ingester configuration `complete_block_timeout` affects how long tags are available for search.
+Live store configuration `complete_block_timeout` affects how long tags are available for search.
+Tag search is supported in blocks as well, based on the start and end query parameters. 
+Tag value search is also supported.
 
 This endpoint retrieves all discovered tag names that can be used in search.
 The endpoint is available in the query frontend service in a microservices deployment, or the Tempo endpoint in a monolithic mode deployment.
@@ -393,8 +394,8 @@ Parameters:
 
 ### Search tags V2
 
-Ingester configuration `complete_block_timeout` affects how long tags are available for search.
-If the start or end aren't specified, it only fetches blocks that weren't flushed to backend.
+Live store configuration `complete_block_timeout` affects how long tags are available for search.
+If the start or end aren't specified, it only fetches recent data from the live store.
 
 This endpoint retrieves all discovered tag names that can be used in search.
 The endpoint is available in the query frontend service in
@@ -408,11 +409,11 @@ GET /api/v2/search/tags?scope=<resource|span|intrinsic|event|link|instrumentatio
 
 Parameters:
 
-- `scope = (resource|span|intrinsic)`
+- `scope = (resource|span|intrinsic|event|link|instrumentation)`
   Specifies the scope of the tags, this is an optional parameter, if not specified it means all scopes.
   Default = `all`
 - `q = (traceql query)`
-  Optional. A TraceQL query to filter tag names by. Currently only works for a single spanset of `&&`ed conditions. For example: `{ span.foo = "bar" && resource.baz = "bat" ...}`. See also [Filtered tag values](#filtered-tag-values).
+  Optional. A TraceQL query to filter tag names by. Supports `&&` and `||` operators within a single spanset. For example: `{ span.foo = "bar" && resource.baz = "bat" }` or `{ span.foo = "bar" || resource.baz = "bat" }`. See also [Filtered tag values](#filtered-tag-values).
 - `start = (unix epoch seconds)`
   Optional. Along with `end` define a time range from which tags should be returned.
 - `end = (unix epoch seconds)`
@@ -513,8 +514,8 @@ curl -G -s http://localhost:3200/api/v2/search/tags  | jq
 
 ### Search tag values
 
-Ingester configuration `complete_block_timeout` affects how long tags are available for search.
-If start or end aren't specified, it only fetches blocks that wasn't flushed to backend.
+Live store configuration `complete_block_timeout` affects how long tags are available for search.
+If start or end aren't specified, it only fetches recent data from the live store.
 
 This endpoint retrieves all discovered values for the given tag, which can be used in search.
 The endpoint is available in the query frontend service in a microservices deployment, or the Tempo endpoint in a monolithic mode deployment.
@@ -609,7 +610,7 @@ Parameters:
 - `end = (unix epoch seconds)`
   Optional. Along with `start`, defines a time range from which tags values should be returned. Providing both `start` and `end` includes blocks for the specified time range only.
 - `q = (traceql query)`
-  Optional. A TraceQL query to filter tag values by. Currently only works for a single spanset of `&&`ed conditions. For example: `{ span.foo = "bar" && resource.baz = "bat" ...}`. Refer to [Filtered tag values](#filtered-tag-values).
+  Optional. A TraceQL query to filter tag values by. Supports `&&` and `||` operators within a single spanset. For example: `{ span.foo = "bar" && resource.baz = "bat" }` or `{ span.foo = "bar" || resource.baz = "bat" }`. Refer to [Filtered tag values](#filtered-tag-values).
 - `limit = (integer)`
   Optional. Limits the maximum number of tags values
 - `maxStaleValues = (integer)`
@@ -633,12 +634,13 @@ Tempo extracts only the valid matchers and builds a valid query.
 If an input is invalid, Tempo doesn't provide an error. Instead,
 you'll see the whole list when a failure of parsing input. This behavior helps with backwards compatibility.
 
-Only queries with a single selector `{}` and AND `&&` operators are supported.
+Queries must use a single spanset selector `{}`. Both `&&` and `||` operators are supported within the selector.
 
 - Example supported: `{ resource.cluster = "us-east-1" && resource.service = "frontend" }`
-- Example unsupported: `{ resource.cluster = "us-east-1" || resource.service = "frontend" } && { resource.cluster = "us-east-2" }`
+- Example supported: `{ resource.cluster = "us-east-1" || resource.service = "frontend" }`
+- Example unsupported: `{ resource.cluster = "us-east-1" } && { resource.cluster = "us-east-2" }`
 
-Unscoped attributes aren't supported for filtered tag values.
+Unscoped attributes are supported for filtered tag values. When you use an unscoped attribute name, Tempo looks for matches in both span and resource scopes.
 
 The following request returns all discovered service names on spans with `span.http.method=GET`:
 
@@ -729,51 +731,10 @@ Meant to be used in a Query Visualization UI like Grafana to test that the Tempo
 
 For more information about user-configurable overrides API, refer to the [user-configurable overrides](https://grafana.com/docs/tempo/<TEMPO_VERSION>/operations/manage-advanced-systems/user-configurable-overrides/#api) documentation.
 
-### Flush
-
-```
-GET,POST /flush
-```
-
-Triggers a flush of all in-memory traces to the WAL. Useful at the time of rollout restarts and unexpected crashes.
-
-Specify the `tenant` parameter to flush data of a single tenant only.
-
-```
-GET,POST /flush?tenant=dev
-```
-
-### Shutdown
-
-```
-GET,POST /shutdown
-```
-
-Flushes all in-memory traces and the WAL to the long term backend. Gracefully exits from the ring. Shuts down the
-ingester service.
-
-{{< admonition type="note" >}}
-This is usually used at the time of scaling down a cluster.
-{{< /admonition >}}
-
-### Prepare partition downscale
-
-```
-GET,POST,DELETE /ingester/prepare-partition-downscale
-```
-
-This endpoint prepares the ingester's partition for downscaling by setting it to the `INACTIVE` state.
-
-A `GET` call to this endpoint returns a timestamp of when the partition was switched to the `INACTIVE` state, or 0, if the partition is not in the `INACTIVE` state.
-
-A `POST` call switches this ingester's partition to the `INACTIVE` state, if it isn't `INACTIVE` already, and returns the timestamp of when the switch to the `INACTIVE` state occurred.
-
-A `DELETE` call sets the partition back from the `INACTIVE` to the `ACTIVE` state.
-
 ### Prepare live store downscale
 
 ```
-POST,DELETE /live-store/prepare-downscale
+GET,POST,DELETE /live-store/prepare-downscale
 ```
 
 This endpoint prepares the live store for downscaling by configuring whether it should remove itself from the ring on shutdown.
@@ -826,7 +787,7 @@ tempo_usage_tracker_bytes_received_total{service="service-A",tenant="single-tena
 ### Distributor ring status
 
 {{< admonition type="note" >}}
-This endpoint is only available when Tempo is configured with [the global override strategy](https://grafana.com/docs/tempo/<TEMPO_VERSION>/configuration/#overrides).
+This endpoint is only available when Tempo is configured with [the global ingestion rate strategy](https://grafana.com/docs/tempo/<TEMPO_VERSION>/configuration/#ingestion-rate-strategy).
 {{< /admonition >}}
 
 ```
@@ -838,27 +799,25 @@ distributor.
 
 For more information, refer to [consistent hash ring](https://grafana.com/docs/tempo/<TEMPO_VERSION>/operations/manage-advanced-systems/consistent_hash_ring/).
 
-### Ingesters ring status
+### Live-store ring status
 
 ```
-GET /ingester/ring
+GET /live-store/ring
 ```
 
-Displays a web page with the ingesters hash ring status, including the state, healthy, and last heartbeat time of each ingester.
+Displays a web page with the live-store hash ring status, including the state, health, and last heartbeat time of each live-store instance.
 
-For more information, refer to [consistent hash ring](http://grafana.com/docs/tempo/<TEMPO_VERSION>/operations/manage-advanced-systems/consistent_hash_ring/).
+For more information, refer to [consistent hash ring](https://grafana.com/docs/tempo/<TEMPO_VERSION>/operations/manage-advanced-systems/consistent_hash_ring/).
 
-### Metrics-generator ring status
+### Partition ring status
 
 ```
-GET /metrics-generator/ring
+GET /partition-ring
 ```
 
-Displays a web page with the metrics-generator hash ring status, including the state, health, and last heartbeat time of each metrics-generator.
+Displays a web page with the partition ring status, showing partition ownership across live-store instances, including state, ownership percentage, and available actions.
 
-This endpoint is only available when the metrics-generator is enabled. Refer to [metrics-generator](https://grafana.com/docs/tempo/<TEMPO_VERSION>/configuration/#metrics-generator).
-
-For more information, refer to [consistent hash ring](http://grafana.com/docs/tempo/<TEMPO_VERSION>/operations/manage-advanced-systems/consistent_hash_ring/).
+For more information, refer to [consistent hash ring](https://grafana.com/docs/tempo/<TEMPO_VERSION>/operations/manage-advanced-systems/consistent_hash_ring/).
 
 ### Status
 
@@ -934,6 +893,21 @@ GET /api/status/buildinfo
 ```
 
 Exposes the build information in a JSON object. The fields are `version`, `revision`, `branch`, `buildDate`, `buildUser`, and `goVersion`.
+
+### Backend scheduler job status
+
+```
+GET /status/backendscheduler
+```
+
+Displays the current state of all jobs in the backend scheduler work cache and the pending redaction queue.
+
+The response is a plain-text table with two sections:
+
+- Active Jobs: all jobs in the work cache, sorted by creation time. Use the `status` column to interpret each row. A non-empty `worker` field indicates the job is currently assigned to a worker.
+- Pending Jobs: redaction jobs in the pending queue. Some may already be eligible to run; others may still be waiting for the rescan or compaction preconditions to clear.
+
+This endpoint is only available when the backend scheduler component is running.
 
 ## Tempo gRPC API
 

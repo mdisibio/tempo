@@ -73,7 +73,7 @@ func TestBackendBlockSearch(t *testing.T) {
 									String02: []string{"dedicated-span-attr-value-2"},
 									String03: []string{"dedicated-span-attr-value-3"},
 									String04: []string{"dedicated-span-attr-value-4"},
-									String05: []string{"dedicated-span-attr-value-5"},
+									String05: []string{test.DedicatedBlobTestString()},
 								},
 							},
 						},
@@ -273,7 +273,7 @@ func makeBackendBlockWithTracesWithDedicatedColumns(t *testing.T, trs []*Trace, 
 	meta.TotalObjects = 1
 	meta.DedicatedColumns = dc
 
-	s := newStreamingBlock(ctx, cfg, meta, r, w, tempo_io.NewBufferedWriter)
+	s, newMeta := newStreamingBlock(ctx, cfg, meta, r, w, tempo_io.NewBufferedWriter)
 
 	for i, tr := range trs {
 		err = s.Add(tr, 0, 0)
@@ -287,7 +287,7 @@ func makeBackendBlockWithTracesWithDedicatedColumns(t *testing.T, trs []*Trace, 
 	_, err = s.Complete()
 	require.NoError(t, err)
 
-	b := newBackendBlock(s.meta, r)
+	b := newBackendBlock(newMeta, r)
 
 	return b
 }
@@ -336,7 +336,7 @@ func makeTraces() ([]*Trace, map[string]string, map[string]string, map[string]st
 		String02: []string{"dedicated-span-attr-value-2"},
 		String03: []string{"dedicated-span-attr-value-3"},
 		String04: []string{"dedicated-span-attr-value-4"},
-		String05: []string{"dedicated-span-attr-value-5"},
+		String05: []string{test.DedicatedBlobTestString()},
 	}
 	spanAttrVals["dedicated.span.1"] = dedicatedSpanAttrs.String01[0]
 	spanAttrVals["dedicated.span.2"] = dedicatedSpanAttrs.String02[0]

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"flag"
 	"fmt"
 	"testing"
 	"time"
@@ -122,6 +123,48 @@ func TestBlockbuilder_getAssignedPartitions(t *testing.T) {
 	require.NoError(t, err)
 	partitions := b.getAssignedPartitions()
 	assert.Equal(t, []int32{0, 2}, partitions)
+}
+
+func TestBlockbuilder_fetchMetricsIncrement(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	t.Cleanup(func() { cancel(errors.New("test done")) })
+
+	k, address := testkafka.CreateCluster(t, 1, testTopic)
+	kafkaCommits := atomic.NewInt32(0)
+	k.ControlKey(kmsg.OffsetCommit, func(kmsg.Request) (kmsg.Response, error, bool) {
+		kafkaCommits.Inc()
+		return nil, nil, false
+	})
+
+	store := newStore(ctx, t)
+	cfg := blockbuilderConfig(t, address, []int32{0})
+
+	recordsStart, err := test.GetCounterVecValue(metricFetchRecordsTotal, "0")
+	require.NoError(t, err)
+	bytesStart, err := test.GetCounterVecValue(metricFetchBytesTotal, "0")
+	require.NoError(t, err)
+
+	b, err := New(cfg, testLogger(t), newPartitionRingReader(), &mockOverrides{}, store)
+	require.NoError(t, err)
+	require.NoError(t, services.StartAndAwaitRunning(ctx, b))
+	t.Cleanup(func() {
+		require.NoError(t, services.StopAndAwaitTerminated(ctx, b))
+	})
+
+	client := testkafka.NewKafkaClient(t, cfg.IngestStorageConfig.Kafka.Address, cfg.IngestStorageConfig.Kafka.Topic)
+	testkafka.SendReq(ctx, t, client, ingest.Encode, util.FakeTenantID)
+
+	require.Eventually(t, func() bool {
+		return kafkaCommits.Load() > 0
+	}, time.Minute, time.Second)
+
+	recordsEnd, err := test.GetCounterVecValue(metricFetchRecordsTotal, "0")
+	require.NoError(t, err)
+	require.Greater(t, recordsEnd-recordsStart, float64(0))
+
+	bytesEnd, err := test.GetCounterVecValue(metricFetchBytesTotal, "0")
+	require.NoError(t, err)
+	require.Greater(t, bytesEnd-bytesStart, float64(0))
 }
 
 // Starting with a pre-existing commit,
@@ -770,7 +813,6 @@ func TestBlockbuilder_marksOldBlocksCompacted(t *testing.T) {
 	t.Cleanup(func() {
 		require.NoError(t, services.StopAndAwaitTerminated(context.Background(), b))
 		cancel(errors.New("test cleanup"))
-		store.Shutdown()
 	})
 
 	// Wait for the records to be consumed and committed
@@ -879,6 +921,9 @@ func blockbuilderConfig(t testing.TB, address string, assignedPartitions []int32
 
 	flagext.DefaultValues(&cfg.BlockConfig)
 
+	cfg.BlockConfig.BlockConfig.RegisterFlagsAndApplyDefaults("", &flag.FlagSet{})
+	cfg.BlockConfig.Version = encoding.DefaultEncoding().Version()
+
 	flagext.DefaultValues(&cfg.IngestStorageConfig.Kafka)
 	cfg.IngestStorageConfig.Kafka.Address = address
 	cfg.IngestStorageConfig.Kafka.Topic = testTopic
@@ -899,8 +944,18 @@ type ownEverythingSharder struct{}
 func (o *ownEverythingSharder) Owns(string) bool { return true }
 
 func newStore(ctx context.Context, t testing.TB) storage.Store {
+	// The store is never started as a dskit service, so StopAndAwaitTerminated
+	// transitions New→Terminated without calling stopping()/Shutdown(). cancel()
+	// signals the blocklist polling goroutine (started by EnablePolling) to
+	// exit, and store.Shutdown() blocks until it actually has. Both are needed:
+	// without cancel() the goroutine never exits; without Shutdown() we don't
+	// wait for it, and it races with t.TempDir() cleanup, writing tenant index
+	// files while os.RemoveAll runs.
+	ctx, cancel := context.WithCancel(ctx)
 	store := newStoreWithLogger(ctx, t, testLogger(t), false)
 	t.Cleanup(func() {
+		cancel()
+		store.Shutdown()
 		require.NoError(t, services.StopAndAwaitTerminated(context.Background(), store))
 	})
 	return store
@@ -955,21 +1010,27 @@ func (m *storeWrapper) WriteBlock(ctx context.Context, block tempodb.WriteableBl
 
 var _ ring.PartitionRingReader = (*mockPartitionRingReader)(nil)
 
+func mustPartitionRing(partitions map[int32]ring.PartitionDesc) *ring.PartitionRing {
+	ring, err := ring.NewPartitionRing(ring.PartitionRingDesc{
+		Partitions: partitions,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return ring
+}
+
 func newPartitionRingReader() *mockPartitionRingReader {
 	return &mockPartitionRingReader{
-		r: ring.NewPartitionRing(ring.PartitionRingDesc{
-			Partitions: map[int32]ring.PartitionDesc{
-				0: {State: ring.PartitionActive},
-			},
+		r: mustPartitionRing(map[int32]ring.PartitionDesc{
+			0: {State: ring.PartitionActive},
 		}),
 	}
 }
 
 func newPartitionRingReaderWithPartitions(partitions map[int32]ring.PartitionDesc) *mockPartitionRingReader {
 	return &mockPartitionRingReader{
-		r: ring.NewPartitionRing(ring.PartitionRingDesc{
-			Partitions: partitions,
-		}),
+		r: mustPartitionRing(partitions),
 	}
 }
 

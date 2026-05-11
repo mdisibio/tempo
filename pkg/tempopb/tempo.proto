@@ -14,12 +14,6 @@ service Pusher {
   rpc PushBytesV2(PushBytesRequest) returns (PushResponse) {}
 }
 
-service MetricsGenerator {
-  rpc PushSpans(PushSpansRequest) returns (PushResponse) {}
-  rpc GetMetrics(SpanMetricsRequest) returns (SpanMetricsResponse) {}
-  rpc QueryRange(QueryRangeRequest) returns (QueryRangeResponse) {}
-}
-
 service Querier {
   rpc FindTraceByID(TraceByIDRequest) returns (TraceByIDResponse) {}
   rpc SearchRecent(SearchRequest) returns (SearchResponse) {}
@@ -51,8 +45,9 @@ message TraceByIDRequest {
   string blockEnd = 3;
   string queryMode = 5;
   bool allowPartialTrace = 6;
-  // Rhythm fields
+
   google.protobuf.Timestamp RF1After = 7 [
+    deprecated = true,
     (gogoproto.stdtime) = true,
     (gogoproto.nullable) = false
   ];
@@ -81,11 +76,15 @@ message SearchRequest {
   // TraceQL query
   string Query = 8;
   uint32 SpansPerSpanSet = 9;
-  // Rhythm fields
+
   google.protobuf.Timestamp RF1After = 10 [
+    deprecated = true,
     (gogoproto.stdtime) = true,
     (gogoproto.nullable) = false
   ];
+
+  // names of AST transformations to skip; populated by the frontend from query_frontend.skip_ast_transformations
+  repeated string skipASTTransformations = 11;
 }
 
 // SearchBlockRequest takes SearchRequest parameters as well as all information
@@ -179,8 +178,9 @@ message SearchTagsRequest {
   uint32 end = 4;
   uint32 maxTagsPerScope = 5;
   uint32 staleValuesThreshold = 6;
-  // Rhythm fields
+
   google.protobuf.Timestamp RF1After = 7 [
+    deprecated = true,
     (gogoproto.stdtime) = true,
     (gogoproto.nullable) = false
   ];
@@ -243,8 +243,9 @@ message SearchTagValuesRequest {
   uint32 end = 5;
   uint32 maxTagValues = 6;
   uint32 staleValueThreshold = 7; // Limit of stale values
-  // Rhythm fields
+
   google.protobuf.Timestamp RF1After = 8 [
+    deprecated = true,
     (gogoproto.stdtime) = true,
     (gogoproto.nullable) = false
   ];
@@ -329,66 +330,6 @@ message LinkSlice {
   repeated tempopb.trace.v1.Span.Link links = 1;
 }
 
-message SpanMetricsRequest {
-  string query = 1;
-  string groupBy = 2;
-  uint64 limit = 3;
-  uint32 start = 4;
-  uint32 end = 5;
-}
-
-message SpanMetricsResponse {
-  bool estimated = 1;
-  uint64 spanCount = 2;
-  uint64 errorSpanCount = 3;
-  repeated SpanMetrics metrics = 4;
-}
-
-message RawHistogram {
-  uint64 bucket = 1;
-  uint64 count = 2;
-}
-
-message KeyValue {
-  string key = 1;
-  TraceQLStatic value = 2;
-}
-
-message SpanMetrics {
-  repeated RawHistogram latency_histogram = 1;
-  repeated KeyValue series = 2;
-  uint64 errors = 3;
-}
-
-message TraceQLStatic {
-  int32 type = 1;
-  int64 n = 2;
-  double f = 3;
-  string s = 4;
-  bool b = 5;
-  uint64 d = 6;
-  int32 status = 7;
-  int32 kind = 8;
-}
-
-message SpanMetricsData {
-  string resultType = 1;
-  repeated SpanMetricsResult result = 2;
-}
-
-message SpanMetricsResult {
-  string labelName = 1; // if these are empty it is the primary trend
-  string labelValue = 2;
-  repeated SpanMetricsResultPoint ts = 3;
-}
-
-message SpanMetricsResultPoint {
-  uint32 time = 1;
-  double val = 2;
-  bytes exemplarTraceID = 3;
-  uint64 exemplarDuration = 4;
-}
-
 message QueryInstantRequest {
   string query = 1;
   uint64 start = 2;
@@ -434,6 +375,9 @@ message QueryRangeRequest {
   uint32 exemplars = 16;
   uint32 maxSeries = 17; // max response serie before bailing early
   optional bool instant = 18; // whether this is an instant query
+
+  // names of AST transformations to skip; populated by the frontend from query_frontend.skip_ast_transformations
+  repeated string skipASTTransformations = 19;
 }
 
 enum PartialStatus {

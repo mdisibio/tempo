@@ -1,6 +1,10 @@
 package overrides
 
 import (
+	"encoding/json"
+	"fmt"
+	"maps"
+	"sync"
 	"time"
 
 	"github.com/grafana/tempo/modules/overrides/histograms"
@@ -46,6 +50,7 @@ func (c *Overrides) toLegacy() LegacyOverrides {
 		MetricsGeneratorProcessorServiceGraphsEnableMessagingSystemLatencyHistogram: c.MetricsGenerator.Processor.ServiceGraphs.EnableMessagingSystemLatencyHistogram,
 		MetricsGeneratorProcessorServiceGraphsEnableVirtualNodeLabel:                c.MetricsGenerator.Processor.ServiceGraphs.EnableVirtualNodeLabel,
 		MetricsGeneratorProcessorServiceGraphsSpanMultiplierKey:                     c.MetricsGenerator.Processor.ServiceGraphs.SpanMultiplierKey,
+		MetricsGeneratorProcessorServiceGraphsEnableTraceStateSpanMultiplier:        c.MetricsGenerator.Processor.ServiceGraphs.EnableTraceStateSpanMultiplier,
 		MetricsGeneratorProcessorSpanMetricsHistogramBuckets:                        c.MetricsGenerator.Processor.SpanMetrics.HistogramBuckets,
 		MetricsGeneratorProcessorSpanMetricsDimensions:                              c.MetricsGenerator.Processor.SpanMetrics.Dimensions,
 		MetricsGeneratorProcessorSpanMetricsIntrinsicDimensions:                     c.MetricsGenerator.Processor.SpanMetrics.IntrinsicDimensions,
@@ -55,12 +60,7 @@ func (c *Overrides) toLegacy() LegacyOverrides {
 		MetricsGeneratorProcessorSpanMetricsTargetInfoExcludedDimensions:            c.MetricsGenerator.Processor.SpanMetrics.TargetInfoExcludedDimensions,
 		MetricsGeneratorProcessorSpanMetricsEnableInstanceLabel:                     c.MetricsGenerator.Processor.SpanMetrics.EnableInstanceLabel,
 		MetricsGeneratorProcessorSpanMetricsSpanMultiplierKey:                       c.MetricsGenerator.Processor.SpanMetrics.SpanMultiplierKey,
-		MetricsGeneratorProcessorLocalBlocksMaxLiveTraces:                           c.MetricsGenerator.Processor.LocalBlocks.MaxLiveTraces,
-		MetricsGeneratorProcessorLocalBlocksMaxBlockDuration:                        c.MetricsGenerator.Processor.LocalBlocks.MaxBlockDuration,
-		MetricsGeneratorProcessorLocalBlocksMaxBlockBytes:                           c.MetricsGenerator.Processor.LocalBlocks.MaxBlockBytes,
-		MetricsGeneratorProcessorLocalBlocksFlushCheckPeriod:                        c.MetricsGenerator.Processor.LocalBlocks.FlushCheckPeriod,
-		MetricsGeneratorProcessorLocalBlocksTraceIdlePeriod:                         c.MetricsGenerator.Processor.LocalBlocks.TraceIdlePeriod,
-		MetricsGeneratorProcessorLocalBlocksCompleteBlockTimeout:                    c.MetricsGenerator.Processor.LocalBlocks.CompleteBlockTimeout,
+		MetricsGeneratorProcessorSpanMetricsEnableTraceStateSpanMultiplier:          c.MetricsGenerator.Processor.SpanMetrics.EnableTraceStateSpanMultiplier,
 		MetricsGeneratorProcessorHostInfoHostIdentifiers:                            c.MetricsGenerator.Processor.HostInfo.HostIdentifiers,
 		MetricsGeneratorProcessorHostInfoMetricName:                                 c.MetricsGenerator.Processor.HostInfo.MetricName,
 		MetricsGeneratorIngestionSlack:                                              c.MetricsGenerator.IngestionSlack,
@@ -74,12 +74,14 @@ func (c *Overrides) toLegacy() LegacyOverrides {
 		CompactionWindow:   c.Compaction.CompactionWindow,
 		CompactionDisabled: c.Compaction.CompactionDisabled,
 
-		MaxBytesPerTagValuesQuery:  c.Read.MaxBytesPerTagValuesQuery,
-		MaxBlocksPerTagValuesQuery: c.Read.MaxBlocksPerTagValuesQuery,
-		MaxSearchDuration:          c.Read.MaxSearchDuration,
-		MaxMetricsDuration:         c.Read.MaxMetricsDuration,
-		UnsafeQueryHints:           c.Read.UnsafeQueryHints,
-		LeftPadTraceIDs:            c.Read.LeftPadTraceIDs,
+		MaxBytesPerTagValuesQuery:     c.Read.MaxBytesPerTagValuesQuery,
+		MaxBlocksPerTagValuesQuery:    c.Read.MaxBlocksPerTagValuesQuery,
+		MaxConditionGroupsPerTagQuery: c.Read.MaxConditionGroupsPerTagQuery,
+		MaxSearchDuration:             c.Read.MaxSearchDuration,
+		MaxMetricsDuration:            c.Read.MaxMetricsDuration,
+		UnsafeQueryHints:              c.Read.UnsafeQueryHints,
+		LeftPadTraceIDs:               c.Read.LeftPadTraceIDs,
+		MetricsSpanOnlyFetch:          c.Read.MetricsSpanOnlyFetch,
 
 		MaxBytesPerTrace: c.Global.MaxBytesPerTrace,
 
@@ -88,6 +90,7 @@ func (c *Overrides) toLegacy() LegacyOverrides {
 			Dimensions:     c.CostAttribution.Dimensions,
 			MaxCardinality: c.CostAttribution.MaxCardinality,
 		},
+		Extensions: maps.Clone(c.Extensions), // Copy extensions to avoid modifying the original
 	}
 }
 
@@ -135,6 +138,7 @@ type LegacyOverrides struct {
 	MetricsGeneratorProcessorServiceGraphsEnableMessagingSystemLatencyHistogram *bool                            `yaml:"metrics_generator_processor_service_graphs_enable_messaging_system_latency_histogram" json:"metrics_generator_processor_service_graphs_enable_messaging_system_latency_histogram"`
 	MetricsGeneratorProcessorServiceGraphsEnableVirtualNodeLabel                *bool                            `yaml:"metrics_generator_processor_service_graphs_enable_virtual_node_label" json:"metrics_generator_processor_service_graphs_enable_virtual_node_label"`
 	MetricsGeneratorProcessorServiceGraphsSpanMultiplierKey                     string                           `yaml:"metrics_generator_processor_service_graphs_span_multiplier_key" json:"metrics_generator_processor_service_graphs_span_multiplier_key"`
+	MetricsGeneratorProcessorServiceGraphsEnableTraceStateSpanMultiplier        *bool                            `yaml:"metrics_generator_processor_service_graphs_enable_tracestate_span_multiplier" json:"metrics_generator_processor_service_graphs_enable_tracestate_span_multiplier"`
 	MetricsGeneratorProcessorSpanMetricsHistogramBuckets                        []float64                        `yaml:"metrics_generator_processor_span_metrics_histogram_buckets" json:"metrics_generator_processor_span_metrics_histogram_buckets"`
 	MetricsGeneratorProcessorSpanMetricsDimensions                              []string                         `yaml:"metrics_generator_processor_span_metrics_dimensions" json:"metrics_generator_processor_span_metrics_dimensions"`
 	MetricsGeneratorProcessorSpanMetricsIntrinsicDimensions                     map[string]bool                  `yaml:"metrics_generator_processor_span_metrics_intrinsic_dimensions" json:"metrics_generator_processor_span_metrics_intrinsic_dimensions"`
@@ -144,12 +148,7 @@ type LegacyOverrides struct {
 	MetricsGeneratorProcessorSpanMetricsTargetInfoExcludedDimensions            []string                         `yaml:"metrics_generator_processor_span_metrics_target_info_excluded_dimensions" json:"metrics_generator_processor_span_metrics_target_info_excluded_dimensions"`
 	MetricsGeneratorProcessorSpanMetricsEnableInstanceLabel                     *bool                            `yaml:"metrics_generator_processor_span_metrics_enable_instance_label" json:"metrics_generator_processor_span_metrics_enable_instance_label"`
 	MetricsGeneratorProcessorSpanMetricsSpanMultiplierKey                       string                           `yaml:"metrics_generator_processor_span_metrics_span_multiplier_key" json:"metrics_generator_processor_span_metrics_span_multiplier_key"`
-	MetricsGeneratorProcessorLocalBlocksMaxLiveTraces                           uint64                           `yaml:"metrics_generator_processor_local_blocks_max_live_traces" json:"metrics_generator_processor_local_blocks_max_live_traces"`
-	MetricsGeneratorProcessorLocalBlocksMaxBlockDuration                        time.Duration                    `yaml:"metrics_generator_processor_local_blocks_max_block_duration" json:"metrics_generator_processor_local_blocks_max_block_duration"`
-	MetricsGeneratorProcessorLocalBlocksMaxBlockBytes                           uint64                           `yaml:"metrics_generator_processor_local_blocks_max_block_bytes" json:"metrics_generator_processor_local_blocks_max_block_bytes"`
-	MetricsGeneratorProcessorLocalBlocksFlushCheckPeriod                        time.Duration                    `yaml:"metrics_generator_processor_local_blocks_flush_check_period" json:"metrics_generator_processor_local_blocks_flush_check_period"`
-	MetricsGeneratorProcessorLocalBlocksTraceIdlePeriod                         time.Duration                    `yaml:"metrics_generator_processor_local_blocks_trace_idle_period" json:"metrics_generator_processor_local_blocks_trace_idle_period"`
-	MetricsGeneratorProcessorLocalBlocksCompleteBlockTimeout                    time.Duration                    `yaml:"metrics_generator_processor_local_blocks_complete_block_timeout" json:"metrics_generator_processor_local_blocks_complete_block_timeout"`
+	MetricsGeneratorProcessorSpanMetricsEnableTraceStateSpanMultiplier          *bool                            `yaml:"metrics_generator_processor_span_metrics_enable_tracestate_span_multiplier" json:"metrics_generator_processor_span_metrics_enable_tracestate_span_multiplier"`
 	MetricsGeneratorProcessorHostInfoHostIdentifiers                            []string                         `yaml:"metrics_generator_processor_host_info_host_identifiers" json:"metrics_generator_processor_host_info_host_identifiers"`
 	MetricsGeneratorProcessorHostInfoMetricName                                 string                           `yaml:"metrics_generator_processor_host_info_metric_name" json:"metrics_generator_processor_host_info_metric_name"`
 	MetricsGeneratorIngestionSlack                                              time.Duration                    `yaml:"metrics_generator_ingestion_time_range_slack" json:"metrics_generator_ingestion_time_range_slack,omitempty"`
@@ -160,14 +159,16 @@ type LegacyOverrides struct {
 	CompactionWindow   model.Duration `yaml:"compaction_window" json:"compaction_window"`
 
 	// Querier and Ingester enforced limits.
-	MaxBytesPerTagValuesQuery  int `yaml:"max_bytes_per_tag_values_query" json:"max_bytes_per_tag_values_query"`
-	MaxBlocksPerTagValuesQuery int `yaml:"max_blocks_per_tag_values_query" json:"max_blocks_per_tag_values_query"`
+	MaxBytesPerTagValuesQuery     int `yaml:"max_bytes_per_tag_values_query" json:"max_bytes_per_tag_values_query"`
+	MaxBlocksPerTagValuesQuery    int `yaml:"max_blocks_per_tag_values_query" json:"max_blocks_per_tag_values_query"`
+	MaxConditionGroupsPerTagQuery int `yaml:"max_condition_groups_per_tag_query" json:"max_condition_groups_per_tag_query"`
 
 	// QueryFrontend enforced limits
-	MaxSearchDuration  model.Duration `yaml:"max_search_duration" json:"max_search_duration"`
-	MaxMetricsDuration model.Duration `yaml:"max_metrics_duration" json:"max_metrics_duration"`
-	UnsafeQueryHints   bool           `yaml:"unsafe_query_hints" json:"unsafe_query_hints"`
-	LeftPadTraceIDs    bool           `yaml:"left_pad_trace_ids" json:"left_pad_trace_ids"`
+	MaxSearchDuration    model.Duration `yaml:"max_search_duration" json:"max_search_duration"`
+	MaxMetricsDuration   model.Duration `yaml:"max_metrics_duration" json:"max_metrics_duration"`
+	UnsafeQueryHints     bool           `yaml:"unsafe_query_hints" json:"unsafe_query_hints"`
+	LeftPadTraceIDs      bool           `yaml:"left_pad_trace_ids" json:"left_pad_trace_ids"`
+	MetricsSpanOnlyFetch *bool          `yaml:"metrics_spanonly_fetch,omitempty" json:"metrics_spanonly_fetch,omitempty"`
 
 	// MaxBytesPerTrace is enforced in the Ingester, Compactor, Querier (Search). It
 	//  is not used when doing a trace by id lookup.
@@ -177,10 +178,132 @@ type LegacyOverrides struct {
 
 	// tempodb limits
 	DedicatedColumns backend.DedicatedColumns `yaml:"parquet_dedicated_columns" json:"parquet_dedicated_columns"`
+
+	// Extensions mirrors Overrides.Extensions: typed instances keyed by nested Key() after unmarshal.
+	Extensions map[string]any `yaml:",inline" json:"-"`
 }
 
-func (l *LegacyOverrides) toNewLimits() Overrides {
-	return Overrides{
+// knownLegacyOverridesJSONFields returns the JSON key names declared on LegacyOverrides
+var knownLegacyOverridesJSONFields = sync.OnceValue(func() map[string]struct{} {
+	return fieldNamesFor(LegacyOverrides{}, "json")
+})
+
+// knownLegacyOverridesYAMLFields returns the YAML key names declared on LegacyOverrides.
+var knownLegacyOverridesYAMLFields = sync.OnceValue(func() map[string]struct{} {
+	return fieldNamesFor(LegacyOverrides{}, "yaml")
+})
+
+// isKnownLegacyOverridesField reports whether key matches any YAML or JSON field
+func isKnownLegacyOverridesField(key string) bool {
+	_, inJSON := knownLegacyOverridesJSONFields()[key]
+	_, inYAML := knownLegacyOverridesYAMLFields()[key]
+	return inJSON || inYAML
+}
+
+func (l *LegacyOverrides) UnmarshalJSON(data []byte) error {
+	type plain LegacyOverrides
+	if err := json.Unmarshal(data, (*plain)(l)); err != nil {
+		return err
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	for key := range knownLegacyOverridesJSONFields() {
+		delete(raw, key)
+	}
+	if len(raw) == 0 {
+		// No extension keys in this payload; clear any stale Extensions from a prior decode.
+		l.Extensions = nil
+		return nil
+	}
+
+	l.Extensions = make(map[string]any, len(raw))
+	for k, v := range raw {
+		var val any
+		if err := json.Unmarshal(v, &val); err != nil {
+			return err
+		}
+		l.Extensions[k] = val
+	}
+
+	// Convert flat legacy keys to typed instances; processExtensions must not be called here
+	// as it expects nested keys (e.g. "my_ext"), not flat legacy keys (e.g. "my_ext_field").
+	return processLegacyExtensions(l)
+}
+
+func (l LegacyOverrides) MarshalJSON() ([]byte, error) {
+	type plain LegacyOverrides
+	data, err := json.Marshal(plain(l))
+	if err != nil {
+		return nil, err
+	}
+	if len(l.Extensions) == 0 {
+		return data, nil
+	}
+
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, err
+	}
+	// Flatten typed extensions to legacy flat keys; copy other entries as-is.
+	for k, v := range l.Extensions {
+		ext, ok := v.(Extension)
+		if !ok {
+			return nil, fmt.Errorf("extension %q is not an Extension", k)
+		}
+
+		for fk, fv := range ext.ToLegacy() {
+			if _, exists := m[fk]; exists {
+				continue // known fields take precedence
+			}
+			b, err := json.Marshal(fv)
+			if err != nil {
+				return nil, err
+			}
+			m[fk] = b
+		}
+	}
+	return json.Marshal(m)
+}
+
+func (l *LegacyOverrides) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	type plain LegacyOverrides
+	if err := unmarshal((*plain)(l)); err != nil {
+		return err
+	}
+	// Convert registered extension flat keys to typed instances, matching Overrides.Extensions.
+	return processLegacyExtensions(l)
+}
+
+func (l LegacyOverrides) MarshalYAML() (interface{}, error) {
+	type plain LegacyOverrides
+	if len(l.Extensions) == 0 {
+		return plain(l), nil
+	}
+	// Flatten typed extensions to legacy flat keys so the YAML wire format matches the legacy shape.
+	knownLegacy := knownLegacyOverridesYAMLFields()
+	flat, err := flattenExtensionEntries(l.Extensions)
+	if err != nil {
+		return nil, err
+	}
+
+	filtered := make(map[string]any, len(flat))
+	for k, v := range flat {
+		if _, known := knownLegacy[k]; known {
+			continue
+		}
+		filtered[k] = v
+	}
+	cp := l
+	cp.Extensions = filtered
+	return plain(cp), nil
+}
+
+func (l *LegacyOverrides) toNewLimits() *Overrides {
+	return &Overrides{
 		Ingestion: IngestionOverrides{
 			RateStrategy:           l.IngestionRateStrategy,
 			RateLimitBytes:         l.IngestionRateLimitBytes,
@@ -193,12 +316,14 @@ func (l *LegacyOverrides) toNewLimits() Overrides {
 			RetryInfoEnabled:       l.IngestionRetryInfoEnabled,
 		},
 		Read: ReadOverrides{
-			MaxBytesPerTagValuesQuery:  l.MaxBytesPerTagValuesQuery,
-			MaxBlocksPerTagValuesQuery: l.MaxBlocksPerTagValuesQuery,
-			MaxSearchDuration:          l.MaxSearchDuration,
-			MaxMetricsDuration:         l.MaxMetricsDuration,
-			UnsafeQueryHints:           l.UnsafeQueryHints,
-			LeftPadTraceIDs:            l.LeftPadTraceIDs,
+			MaxBytesPerTagValuesQuery:     l.MaxBytesPerTagValuesQuery,
+			MaxBlocksPerTagValuesQuery:    l.MaxBlocksPerTagValuesQuery,
+			MaxConditionGroupsPerTagQuery: l.MaxConditionGroupsPerTagQuery,
+			MaxSearchDuration:             l.MaxSearchDuration,
+			MaxMetricsDuration:            l.MaxMetricsDuration,
+			UnsafeQueryHints:              l.UnsafeQueryHints,
+			LeftPadTraceIDs:               l.LeftPadTraceIDs,
+			MetricsSpanOnlyFetch:          l.MetricsSpanOnlyFetch,
 		},
 		Compaction: CompactionOverrides{
 			BlockRetention:     l.BlockRetention,
@@ -230,25 +355,19 @@ func (l *LegacyOverrides) toNewLimits() Overrides {
 					EnableMessagingSystemLatencyHistogram: l.MetricsGeneratorProcessorServiceGraphsEnableMessagingSystemLatencyHistogram,
 					EnableVirtualNodeLabel:                l.MetricsGeneratorProcessorServiceGraphsEnableVirtualNodeLabel,
 					SpanMultiplierKey:                     l.MetricsGeneratorProcessorServiceGraphsSpanMultiplierKey,
+					EnableTraceStateSpanMultiplier:        l.MetricsGeneratorProcessorServiceGraphsEnableTraceStateSpanMultiplier,
 				},
 				SpanMetrics: SpanMetricsOverrides{
-					HistogramBuckets:             l.MetricsGeneratorProcessorSpanMetricsHistogramBuckets,
-					Dimensions:                   l.MetricsGeneratorProcessorSpanMetricsDimensions,
-					IntrinsicDimensions:          l.MetricsGeneratorProcessorSpanMetricsIntrinsicDimensions,
-					FilterPolicies:               l.MetricsGeneratorProcessorSpanMetricsFilterPolicies,
-					DimensionMappings:            l.MetricsGeneratorProcessorSpanMetricsDimensionMappings,
-					EnableTargetInfo:             l.MetricsGeneratorProcessorSpanMetricsEnableTargetInfo,
-					TargetInfoExcludedDimensions: l.MetricsGeneratorProcessorSpanMetricsTargetInfoExcludedDimensions,
-					EnableInstanceLabel:          l.MetricsGeneratorProcessorSpanMetricsEnableInstanceLabel,
-					SpanMultiplierKey:            l.MetricsGeneratorProcessorSpanMetricsSpanMultiplierKey,
-				},
-				LocalBlocks: LocalBlocksOverrides{
-					MaxLiveTraces:        l.MetricsGeneratorProcessorLocalBlocksMaxLiveTraces,
-					MaxBlockDuration:     l.MetricsGeneratorProcessorLocalBlocksMaxBlockDuration,
-					MaxBlockBytes:        l.MetricsGeneratorProcessorLocalBlocksMaxBlockBytes,
-					FlushCheckPeriod:     l.MetricsGeneratorProcessorLocalBlocksFlushCheckPeriod,
-					TraceIdlePeriod:      l.MetricsGeneratorProcessorLocalBlocksTraceIdlePeriod,
-					CompleteBlockTimeout: l.MetricsGeneratorProcessorLocalBlocksCompleteBlockTimeout,
+					HistogramBuckets:               l.MetricsGeneratorProcessorSpanMetricsHistogramBuckets,
+					Dimensions:                     l.MetricsGeneratorProcessorSpanMetricsDimensions,
+					IntrinsicDimensions:            l.MetricsGeneratorProcessorSpanMetricsIntrinsicDimensions,
+					FilterPolicies:                 l.MetricsGeneratorProcessorSpanMetricsFilterPolicies,
+					DimensionMappings:              l.MetricsGeneratorProcessorSpanMetricsDimensionMappings,
+					EnableTargetInfo:               l.MetricsGeneratorProcessorSpanMetricsEnableTargetInfo,
+					TargetInfoExcludedDimensions:   l.MetricsGeneratorProcessorSpanMetricsTargetInfoExcludedDimensions,
+					EnableInstanceLabel:            l.MetricsGeneratorProcessorSpanMetricsEnableInstanceLabel,
+					SpanMultiplierKey:              l.MetricsGeneratorProcessorSpanMetricsSpanMultiplierKey,
+					EnableTraceStateSpanMultiplier: l.MetricsGeneratorProcessorSpanMetricsEnableTraceStateSpanMultiplier,
 				},
 				HostInfo: HostInfoOverrides{
 					HostIdentifiers: l.MetricsGeneratorProcessorHostInfoHostIdentifiers,
@@ -272,6 +391,7 @@ func (l *LegacyOverrides) toNewLimits() Overrides {
 			Dimensions:     l.CostAttribution.Dimensions,
 			MaxCardinality: l.CostAttribution.MaxCardinality,
 		},
+		Extensions: maps.Clone(l.Extensions), // copy extensions to avoid modifying the original
 	}
 }
 
@@ -287,8 +407,7 @@ func (l *perTenantLegacyOverrides) toNewOverrides() perTenantOverrides {
 	}
 
 	for tenantID, legacyLimits := range l.TenantLimits {
-		limits := legacyLimits.toNewLimits()
-		overrides.TenantLimits[tenantID] = &limits
+		overrides.TenantLimits[tenantID] = legacyLimits.toNewLimits()
 	}
 
 	return overrides

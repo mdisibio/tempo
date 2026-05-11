@@ -85,12 +85,12 @@ func TestQuerierParseSearchRequest(t *testing.T) {
 		{
 			name:     "negative limit",
 			urlQuery: "limit=-5",
-			err:      "invalid limit: must be a positive number",
+			err:      "invalid limit: strconv.ParseUint: parsing \"-5\": invalid syntax",
 		},
 		{
 			name:     "non-numeric limit",
 			urlQuery: "limit=five",
-			err:      "invalid limit: strconv.Atoi: parsing \"five\": invalid syntax",
+			err:      "invalid limit: strconv.ParseUint: parsing \"five\": invalid syntax",
 		},
 		{
 			name:     "minDuration and maxDuration",
@@ -175,6 +175,31 @@ func TestQuerierParseSearchRequest(t *testing.T) {
 			err:      "http parameter start must be before end. received start=20 end=10",
 		},
 		{
+			name:     "negative start",
+			urlQuery: "start=-1&end=20",
+			err:      "invalid start: strconv.ParseUint: parsing \"-1\": invalid syntax",
+		},
+		{
+			name:     "start exceeds uint32",
+			urlQuery: "start=4294967296&end=4294967297",
+			err:      "invalid start: strconv.ParseUint: parsing \"4294967296\": value out of range",
+		},
+		{
+			name:     "negative end",
+			urlQuery: "start=10&end=-1",
+			err:      "invalid end: strconv.ParseUint: parsing \"-1\": invalid syntax",
+		},
+		{
+			name:     "limit exceeds uint32",
+			urlQuery: "limit=4294967298",
+			err:      "invalid limit: strconv.ParseUint: parsing \"4294967298\": value out of range",
+		},
+		{
+			name:     "spss exceeds uint32",
+			urlQuery: "spss=4294967296",
+			err:      "invalid spss: strconv.ParseUint: parsing \"4294967296\": value out of range",
+		},
+		{
 			name:     "top-level tags",
 			urlQuery: "service.name=bar",
 			expected: &tempopb.SearchRequest{
@@ -205,12 +230,12 @@ func TestQuerierParseSearchRequest(t *testing.T) {
 		{
 			name:     "negative spss",
 			urlQuery: "spss=-2",
-			err:      "invalid spss: must be a non-negative number",
+			err:      "invalid spss: strconv.ParseUint: parsing \"-2\": invalid syntax",
 		},
 		{
 			name:     "non-numeric spss",
 			urlQuery: "spss=four",
-			err:      "invalid spss: strconv.Atoi: parsing \"four\": invalid syntax",
+			err:      "invalid spss: strconv.ParseUint: parsing \"four\": invalid syntax",
 		},
 		{
 			name:     "only spss",
@@ -494,64 +519,61 @@ func TestBuildSearchBlockRequest(t *testing.T) {
 	}
 }
 
-func TestValidateAndSanitizeRequest(t *testing.T) {
-	rf1After := time.Date(1970, 1, 1, 1, 16, 40, 0, time.UTC)
+func TestParseTraceByIDRequest(t *testing.T) {
 	tests := []struct {
 		httpReq       *http.Request
 		queryMode     string
-		startTime     int64
-		endTime       int64
+		startTime     time.Time
+		endTime       time.Time
 		blockStart    string
 		blockEnd      string
-		rf1After      time.Time
 		expectedError string
 	}{
 		{
 			httpReq:    httptest.NewRequest("GET", "/api/traces/1234?blockEnd=ffffffffffffffffffffffffffffffff&blockStart=00000000000000000000000000000000&mode=blocks&start=1&end=2", nil),
 			queryMode:  "blocks",
-			startTime:  1,
-			endTime:    2,
+			startTime:  time.Unix(1, 0),
+			endTime:    time.Unix(2, 0),
 			blockStart: "00000000000000000000000000000000",
 			blockEnd:   "ffffffffffffffffffffffffffffffff",
 		},
 		{
 			httpReq:    httptest.NewRequest("GET", "/api/traces/1234?blockEnd=ffffffffffffffffffffffffffffffff&blockStart=00000000000000000000000000000000&mode=blocks", nil),
 			queryMode:  "blocks",
-			startTime:  0,
-			endTime:    0,
+			startTime:  time.Time{},
+			endTime:    time.Time{},
 			blockStart: "00000000000000000000000000000000",
 			blockEnd:   "ffffffffffffffffffffffffffffffff",
 		},
 		{
 			httpReq:    httptest.NewRequest("GET", "/api/traces/1234?mode=blocks", nil),
 			queryMode:  "blocks",
-			startTime:  0,
-			endTime:    0,
+			startTime:  time.Time{},
+			endTime:    time.Time{},
 			blockStart: "00000000-0000-0000-0000-000000000000",
 			blockEnd:   "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
 		},
 		{
 			httpReq:    httptest.NewRequest("GET", "/api/traces/1234?mode=blocks&blockStart=12345678000000001235000001240000&blockEnd=ffffffffffffffffffffffffffffffff", nil),
 			queryMode:  "blocks",
-			startTime:  0,
-			endTime:    0,
+			startTime:  time.Time{},
+			endTime:    time.Time{},
 			blockStart: "12345678000000001235000001240000",
 			blockEnd:   "ffffffffffffffffffffffffffffffff",
 		},
 		{
 			httpReq:    httptest.NewRequest("GET", "/api/traces/1234?mode=blocks&blockStart=12345678000000001235000001240000&blockEnd=ffffffffffffffffffffffffffffffff&rf1After=1970-01-01T01:16:40Z", nil),
 			queryMode:  "blocks",
-			startTime:  0,
-			endTime:    0,
+			startTime:  time.Time{},
+			endTime:    time.Time{},
 			blockStart: "12345678000000001235000001240000",
 			blockEnd:   "ffffffffffffffffffffffffffffffff",
-			rf1After:   rf1After,
 		},
 		{
 			httpReq:       httptest.NewRequest("GET", "/api/traces/1234?mode=blocks&blockStart=12345678000000001235000001240000&blockEnd=ffffffffffffffffffffffffffffffff&start=1&end=1", nil),
 			queryMode:     "blocks",
-			startTime:     0,
-			endTime:       0,
+			startTime:     time.Time{},
+			endTime:       time.Time{},
 			blockStart:    "12345678000000001235000001240000",
 			blockEnd:      "ffffffffffffffffffffffffffffffff",
 			expectedError: "http parameter start must be before end. received start=1 end=1",
@@ -559,15 +581,15 @@ func TestValidateAndSanitizeRequest(t *testing.T) {
 		{
 			httpReq:    httptest.NewRequest("GET", "/api/traces/1234?mode=external&start=1&end=2", nil),
 			queryMode:  "external",
-			startTime:  1,
-			endTime:    2,
+			startTime:  time.Unix(1, 0),
+			endTime:    time.Unix(2, 0),
 			blockStart: "00000000-0000-0000-0000-000000000000",
 			blockEnd:   "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
 		},
 	}
 
 	for _, tc := range tests {
-		blockStart, blockEnd, queryMode, startTime, endTime, rf1After, err := ValidateAndSanitizeRequest(tc.httpReq)
+		blockStart, blockEnd, queryMode, startTime, endTime, err := ParseTraceByIDRequest(tc.httpReq)
 		if len(tc.expectedError) != 0 {
 			assert.EqualError(t, err, tc.expectedError)
 			continue
@@ -578,7 +600,6 @@ func TestValidateAndSanitizeRequest(t *testing.T) {
 		assert.Equal(t, tc.blockEnd, blockEnd)
 		assert.Equal(t, tc.startTime, startTime)
 		assert.Equal(t, tc.endTime, endTime)
-		assert.Equal(t, tc.rf1After, rf1After)
 	}
 }
 
@@ -692,6 +713,41 @@ func Test_parseTimestamp(t *testing.T) {
 				return
 			}
 			assert.Equal(t, got, tt.want, fmt.Sprintf("parseTimestamp() = %v, want %v", got, tt.want))
+		})
+	}
+}
+
+func TestParseQueryRequestInvalidBounds(t *testing.T) {
+	tests := []struct {
+		name   string
+		params map[string]string
+		errMsg string
+	}{
+		{
+			name:   "invalid start",
+			params: map[string]string{"q": "{} | rate()", "start": "abc", "end": "1700000000"},
+			errMsg: "could not parse 'start' parameter",
+		},
+		{
+			name:   "invalid end",
+			params: map[string]string{"q": "{} | rate()", "start": "1700000000", "end": "bca"},
+			errMsg: "could not parse 'end' parameter",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run("range/"+tt.name, func(t *testing.T) {
+			r := makeReq(tt.params)
+			_, err := ParseQueryRangeRequest(r)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.errMsg)
+		})
+
+		t.Run("instant/"+tt.name, func(t *testing.T) {
+			r := makeReq(tt.params)
+			_, err := ParseQueryInstantRequest(r)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.errMsg)
 		})
 	}
 }

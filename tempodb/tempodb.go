@@ -84,7 +84,7 @@ type Writer interface {
 type IterateObjectCallback func(id common.ID, obj []byte) bool
 
 type Reader interface {
-	Find(ctx context.Context, tenantID string, id common.ID, blockStart string, blockEnd string, timeStart int64, timeEnd int64, opts common.SearchOptions) ([]*tempopb.TraceByIDResponse, []error, error)
+	Find(ctx context.Context, tenantID string, id common.ID, blockStart string, blockEnd string, timeStart, timeEnd time.Time, opts common.SearchOptions) ([]*tempopb.TraceByIDResponse, []error, error)
 	Search(ctx context.Context, meta *backend.BlockMeta, req *tempopb.SearchRequest, opts common.SearchOptions) (*tempopb.SearchResponse, error)
 	SearchTags(ctx context.Context, meta *backend.BlockMeta, req *tempopb.SearchTagsBlockRequest, opts common.SearchOptions) (*tempopb.SearchTagsV2Response, error)
 	SearchTagValues(ctx context.Context, meta *backend.BlockMeta, req *tempopb.SearchTagValuesBlockRequest, opts common.SearchOptions) (*tempopb.SearchTagValuesResponse, error)
@@ -92,6 +92,7 @@ type Reader interface {
 
 	// TODO(suraj): use common.MetricsCallback in Fetch and remove the Bytes callback from traceql.FetchSpansResponse
 	Fetch(ctx context.Context, meta *backend.BlockMeta, req traceql.FetchSpansRequest, opts common.SearchOptions) (traceql.FetchSpansResponse, error)
+	FetchSpans(ctx context.Context, meta *backend.BlockMeta, req traceql.FetchSpansRequest, opts common.SearchOptions) (traceql.FetchSpansOnlyResponse, error)
 	FetchTagValues(ctx context.Context, meta *backend.BlockMeta, req traceql.FetchTagValuesRequest, cb traceql.FetchTagValuesCallback, mcb common.MetricsCallback, opts common.SearchOptions) error
 	FetchTagNames(ctx context.Context, meta *backend.BlockMeta, req traceql.FetchTagsRequest, cb traceql.FetchTagsCallback, mcb common.MetricsCallback, opts common.SearchOptions) error
 
@@ -120,6 +121,9 @@ type Compactor interface {
 	CompactWithConfig(ctx context.Context, metas []*backend.BlockMeta, tenantID string, cfg *CompactorConfig, sharder CompactorSharder, overrides CompactorOverrides) ([]*backend.BlockMeta, error)
 	MarkBlocklistCompacted(tenantID string, outputIDs, inputIDs []*backend.BlockMeta) error
 	RetainWithConfig(ctx context.Context, cfg *CompactorConfig, sharder CompactorSharder, overrides CompactorOverrides)
+	RetainTenantWithConfig(ctx context.Context, tenantID string, cfg *CompactorConfig, sharder CompactorSharder, overrides CompactorOverrides)
+
+	RedactBlock(ctx context.Context, meta *backend.BlockMeta, tenantID string, traceIDs []common.ID) (rewrote bool, found int, newMeta *backend.BlockMeta, err error)
 }
 
 type CompactorSharder interface {
@@ -260,7 +264,7 @@ func (rw *readerWriter) CompleteBlockWithBackend(ctx context.Context, block comm
 		return nil, fmt.Errorf("error flushing wal block: %w", err)
 	}
 
-	iter, err := block.Iterator()
+	iter, err := block.Iterator(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -325,7 +329,7 @@ func (rw *readerWriter) Tenants() []string {
 	return rw.blocklist.Tenants()
 }
 
-func (rw *readerWriter) Find(ctx context.Context, tenantID string, id common.ID, blockStart string, blockEnd string, timeStart int64, timeEnd int64, opts common.SearchOptions) ([]*tempopb.TraceByIDResponse, []error, error) {
+func (rw *readerWriter) Find(ctx context.Context, tenantID string, id common.ID, blockStart string, blockEnd string, timeStart, timeEnd time.Time, opts common.SearchOptions) ([]*tempopb.TraceByIDResponse, []error, error) {
 	// tracing instrumentation
 	logger := log.WithContext(ctx, log.Logger)
 	ctx, span := tracer.Start(ctx, "store.Find")
@@ -356,13 +360,13 @@ func (rw *readerWriter) Find(ctx context.Context, tenantID string, id common.ID,
 	compactedBlocksSearched := 0
 
 	for _, b := range blocklist {
-		if includeBlock(b, id, blockStartBytes, blockEndBytes, timeStart, timeEnd, opts.RF1After) {
+		if includeBlock(b, id, blockStartBytes, blockEndBytes, timeStart, timeEnd) {
 			copiedBlocklist = append(copiedBlocklist, b)
 			blocksSearched++
 		}
 	}
 	for _, c := range compactedBlocklist {
-		if includeCompactedBlock(c, id, blockStartBytes, blockEndBytes, rw.cfg.BlocklistPoll, timeStart, timeEnd, opts.RF1After) {
+		if includeCompactedBlock(c, id, blockStartBytes, blockEndBytes, rw.cfg.BlocklistPoll, timeStart, timeEnd) {
 			copiedBlocklist = append(copiedBlocklist, &c.BlockMeta)
 			compactedBlocksSearched++
 		}
@@ -538,6 +542,16 @@ func (rw *readerWriter) Fetch(ctx context.Context, meta *backend.BlockMeta, req 
 	return block.Fetch(ctx, req, opts)
 }
 
+func (rw *readerWriter) FetchSpans(ctx context.Context, meta *backend.BlockMeta, req traceql.FetchSpansRequest, opts common.SearchOptions) (traceql.FetchSpansOnlyResponse, error) {
+	block, err := encoding.OpenBlock(meta, rw.r)
+	if err != nil {
+		return traceql.FetchSpansOnlyResponse{}, err
+	}
+
+	rw.cfg.Search.ApplyToOptions(&opts)
+	return block.FetchSpans(ctx, req, opts)
+}
+
 func (rw *readerWriter) FetchTagValues(ctx context.Context, meta *backend.BlockMeta, req traceql.FetchTagValuesRequest, cb traceql.FetchTagValuesCallback, mcb common.MetricsCallback, opts common.SearchOptions) error {
 	block, err := encoding.OpenBlock(meta, rw.r)
 	if err != nil {
@@ -600,6 +614,100 @@ func (rw *readerWriter) EnableCompaction(ctx context.Context, cfg *CompactorConf
 
 func (rw *readerWriter) MarkBlockCompacted(tenantID string, blockID backend.UUID) error {
 	return rw.c.MarkBlockCompacted((uuid.UUID)(blockID), tenantID)
+}
+
+// RedactBlock rewrites a block excluding the given trace IDs. If none of the trace IDs
+// are in the block, no rewrite is performed.
+func (rw *readerWriter) RedactBlock(ctx context.Context, meta *backend.BlockMeta, tenantID string, traceIDs []common.ID) (rewrote bool, found int, newMeta *backend.BlockMeta, err error) {
+	block, err := encoding.OpenBlock(meta, rw.r)
+	if err != nil {
+		return false, 0, nil, fmt.Errorf("error opening block for redaction, blockID: %s: %w", meta.BlockID.String(), err)
+	}
+
+	searchOpts := common.DefaultSearchOptions()
+	if rw.cfg != nil && rw.cfg.Search != nil {
+		rw.cfg.Search.ApplyToOptions(&searchOpts)
+	}
+
+	var idsToDrop []common.ID
+	for _, traceID := range traceIDs {
+		result, err := block.FindTraceByID(ctx, traceID, searchOpts)
+		if err != nil {
+			return false, 0, nil, fmt.Errorf("error finding trace in block, blockID: %s: %w", meta.BlockID.String(), err)
+		}
+		if result != nil && result.Trace != nil {
+			idsToDrop = append(idsToDrop, traceID)
+		}
+	}
+	if len(idsToDrop) == 0 {
+		return false, 0, nil, nil
+	}
+
+	enc, err := encoding.FromVersion(meta.Version)
+	if err != nil {
+		return false, 0, nil, fmt.Errorf("error getting encoding for version %s: %w", meta.Version, err)
+	}
+
+	opts := common.CompactionOptions{
+		BlockConfig: common.BlockConfig{
+			BloomFP:             common.DefaultBloomFP,
+			BloomShardSizeBytes: common.DefaultBloomShardSizeBytes,
+			Version:             meta.Version,
+			RowGroupSizeBytes:   100_000_000,
+			DedicatedColumns:    meta.DedicatedColumns,
+		},
+		OutputBlocks:     1,
+		MaxBytesPerTrace: 0,
+		DropObject: func(id common.ID) bool {
+			for _, tid := range idsToDrop {
+				if bytes.Equal(id, tid) {
+					level.Debug(rw.logger).Log("msg", "redact dropping trace", "traceID", hex.EncodeToString(id))
+					return true
+				}
+			}
+			return false
+		},
+		BytesWritten:      func(_, _ int) {},
+		ObjectsCombined:   func(_, _ int) {},
+		ObjectsWritten:    func(_, _ int) {},
+		SpansDiscarded:    func(_, _, _ string, _ int) {},
+		DisconnectedTrace: func() {},
+		RootlessTrace:     func() {},
+		DedupedSpans:      func(_, _ int) {},
+	}
+
+	nFound := len(idsToDrop)
+
+	compactor := enc.NewCompactor(opts)
+	out, err := compactor.Compact(ctx, rw.logger, rw.r, rw.w, []*backend.BlockMeta{meta})
+	if err != nil {
+		return false, 0, nil, fmt.Errorf("error compacting block %s: %w", meta.BlockID.String(), err)
+	}
+
+	if len(out) == 0 {
+		err = rw.c.MarkBlockCompacted((uuid.UUID)(meta.BlockID), tenantID)
+		if err != nil {
+			return false, 0, nil, fmt.Errorf("error marking block compacted, blockID: %s: %w", meta.BlockID.String(), err)
+		}
+		return true, nFound, nil, nil
+	}
+
+	if len(out) != 1 {
+		if meta.TotalObjects == int64(nFound) {
+			err = rw.c.MarkBlockCompacted((uuid.UUID)(meta.BlockID), tenantID)
+			if err != nil {
+				return false, 0, nil, fmt.Errorf("error marking block compacted, blockID: %s: %w", meta.BlockID.String(), err)
+			}
+			return true, nFound, nil, nil
+		}
+		return false, 0, nil, fmt.Errorf("expected 1 output block, got %d", len(out))
+	}
+
+	err = rw.c.MarkBlockCompacted((uuid.UUID)(meta.BlockID), tenantID)
+	if err != nil {
+		return false, 0, nil, fmt.Errorf("error marking block compacted, blockID: %s: %w", meta.BlockID.String(), err)
+	}
+	return true, nFound, out[0], nil
 }
 
 // EnablePolling activates the polling loop. Pass nil if this component
@@ -711,7 +819,7 @@ func (rw *readerWriter) pollBlocklist(ctx context.Context) {
 }
 
 // includeBlock indicates whether a given block should be included in a backend search
-func includeBlock(b *backend.BlockMeta, _ common.ID, blockStart, blockEnd []byte, timeStart, timeEnd int64, rf1After time.Time) bool {
+func includeBlock(b *backend.BlockMeta, _ common.ID, blockStart, blockEnd []byte, timeStart, timeEnd time.Time) bool {
 	// todo: restore this functionality once it works. min/max ids are currently not recorded
 	//    https://github.com/grafana/tempo/issues/1903
 	//  correctly in a block
@@ -719,8 +827,8 @@ func includeBlock(b *backend.BlockMeta, _ common.ID, blockStart, blockEnd []byte
 	// 	return false
 	// }
 
-	if timeStart != 0 && timeEnd != 0 {
-		if b.StartTime.Unix() >= timeEnd || b.EndTime.Unix() <= timeStart {
+	if !timeStart.IsZero() && !timeEnd.IsZero() {
+		if !b.StartTime.Before(timeEnd) || !b.EndTime.After(timeStart) {
 			return false
 		}
 	}
@@ -732,21 +840,16 @@ func includeBlock(b *backend.BlockMeta, _ common.ID, blockStart, blockEnd []byte
 		return false
 	}
 
-	if rf1After.IsZero() {
-		return b.ReplicationFactor == backend.DefaultReplicationFactor
-	}
-
-	return (b.StartTime.Before(rf1After) && b.ReplicationFactor == backend.DefaultReplicationFactor) ||
-		(b.StartTime.After(rf1After) && b.ReplicationFactor == backend.MetricsGeneratorReplicationFactor)
+	return true
 }
 
 // if block is compacted within lookback period, and is within shard ranges, include it in search
-func includeCompactedBlock(c *backend.CompactedBlockMeta, id common.ID, blockStart, blockEnd []byte, poll time.Duration, timeStart, timeEnd int64, rf1After time.Time) bool {
+func includeCompactedBlock(c *backend.CompactedBlockMeta, id common.ID, blockStart, blockEnd []byte, poll time.Duration, timeStart, timeEnd time.Time) bool {
 	lookback := time.Now().Add(-(2 * poll))
 	if c.CompactedTime.Before(lookback) {
 		return false
 	}
-	return includeBlock(&c.BlockMeta, id, blockStart, blockEnd, timeStart, timeEnd, rf1After)
+	return includeBlock(&c.BlockMeta, id, blockStart, blockEnd, timeStart, timeEnd)
 }
 
 // createLegacyCache uses the config to return a cache and a list of roles.

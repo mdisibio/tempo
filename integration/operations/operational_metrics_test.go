@@ -63,6 +63,8 @@ func TestWriteMetrics(t *testing.T) {
 		blockbuilder := h.Services[util.ServiceBlockBuilder]
 		assertMetricEquals(t, blockbuilder, "tempo_block_builder_flushed_blocks", float64(1), nil)
 		assertMetricEquals(t, blockbuilder, "tempo_block_builder_owned_partitions", float64(1), nil)
+		assertMetricGreater(t, blockbuilder, "tempo_block_builder_fetch_records_total", float64(0), nil)
+		assertMetricGreater(t, blockbuilder, "tempo_block_builder_fetch_bytes_total", float64(0), nil)
 	})
 }
 
@@ -176,7 +178,7 @@ func TestReadMetrics(t *testing.T) {
 
 		// testing these counts might be a little brittle and we find it's not worthwhile
 		assertMetricCountEquals(t, querier, "tempo_request_duration_seconds", float64(4), map[string]string{"method": "GET", "route": "querier_api_metrics_query_range", "status_code": "200", "ws": "false"})
-		assertMetricCountEquals(t, querier, "tempo_request_duration_seconds", float64(50), map[string]string{"method": "GET", "route": "querier_api_v2_traces_traceid", "status_code": "200", "ws": "false"})
+		assertMetricCountEquals(t, querier, "tempo_request_duration_seconds", float64(2), map[string]string{"method": "GET", "route": "querier_api_v2_traces_traceid", "status_code": "200", "ws": "false"})
 		assertMetricCountEquals(t, querier, "tempo_request_duration_seconds", float64(2), map[string]string{"method": "GET", "route": "querier_api_v2_search_tag_tagname_values", "status_code": "200", "ws": "false"})
 		assertMetricCountEquals(t, querier, "tempo_request_duration_seconds", float64(2), map[string]string{"method": "GET", "route": "querier_api_v2_search_tags", "status_code": "200", "ws": "false"})
 		assertMetricCountEquals(t, querier, "tempo_request_duration_seconds", float64(6), map[string]string{"method": "GET", "route": "querier_api_search", "status_code": "200", "ws": "false"})

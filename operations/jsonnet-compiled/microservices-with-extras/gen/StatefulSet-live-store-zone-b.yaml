@@ -28,7 +28,7 @@ spec:
   template:
     metadata:
       annotations:
-        config_hash: b1f82212da41d566637026058cf4ed17
+        config_hash: 6fd0ca9536af431deb5ea0bfea5158fa
       labels:
         app: live-store-zone-b
         name: live-store-zone-b
@@ -37,6 +37,20 @@ spec:
     spec:
       affinity:
         podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: rollout-group
+                  operator: In
+                  values:
+                  - live-store
+                - key: name
+                  operator: In
+                  values:
+                  - live-store-zone-b
+              topologyKey: kubernetes.io/hostname
+            weight: 100
           requiredDuringSchedulingIgnoredDuringExecution:
           - labelSelector:
               matchExpressions:
@@ -52,9 +66,8 @@ spec:
       containers:
       - args:
         - -config.file=/conf/tempo.yaml
-        - -live-store.instance-availability-zone=zone-b
-        - -mem-ballast-size-mbs=1024
         - -target=live-store
+        - -live-store.instance-availability-zone=zone-b
         image: grafana/tempo:latest
         imagePullPolicy: IfNotPresent
         name: live-store

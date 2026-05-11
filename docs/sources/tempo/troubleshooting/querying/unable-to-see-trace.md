@@ -26,7 +26,7 @@ This flag enables debug logging of all the traces received by the distributor. T
 You can also check the following metrics:
 
 - `tempo_distributor_spans_received_total`
-- `tempo_ingester_traces_created_total`
+- `tempo_live_store_traces_created_total`
 
 The value of both metrics should be greater than `0` within a few minutes of the application spinning up.
 You can check both metrics using either:
@@ -64,16 +64,51 @@ To fix an incorrect endpoint issue:
 
 - If the application is also running inside docker, make sure the application is sending traces to the correct endpoint (`tempo:<receiver-port>`).
 
-## Case 2 - tempo_ingester_traces_created_total is 0
+## Case 2 - tempo_live_store_traces_created_total is 0
 
-If the value of `tempo_ingester_traces_created_total` is 0, this can indicate network issues between distributors and ingesters.
-
-Checking the metric `tempo_request_duration_seconds_count{route='/tempopb.Pusher/Push'}` exposed from the ingester which indicates that it's receiving ingestion requests from the distributor.
+If the value of `tempo_live_store_traces_created_total` is 0, this can indicate issues between the distributors and Kafka, or between Kafka and the live-stores.
 
 ### Solution
 
-Check logs of distributors for a message like `msg="pusher failed to consume trace data" err="DoBatch: IngesterCount <= 0"`.
-This is likely because no ingester is joining the gossip ring, make sure the same gossip ring address is supplied to the distributors and ingesters.
+- Check distributor logs for Kafka write errors such as `msg="failed to write to kafka"`.
+- Verify that Kafka is healthy and that the distributors can reach it.
+- Check live-store logs to ensure they are consuming from Kafka successfully. Look for consumer lag metrics to confirm data is flowing.
+
+## Case 3 - Live-store Kafka lag
+
+If the live-store is lagging behind its Kafka partition, queries for recent data may return incomplete results.
+
+To check whether lag is affecting queries, run the following PromQL query in Grafana or Prometheus:
+
+```promql
+rate(tempo_live_store_lagged_requests_total[5m])
+```
+
+A non-zero rate means that query time ranges are overlapping with the live-store's Kafka lag, and some recently ingested traces may be missing from results. The metric is labeled by `route`, so you can see which query type is affected (`/tempopb.Querier/SearchRecent` for search queries or `/tempopb.Metrics/QueryRange` for TraceQL metrics queries).
+
+### Solution
+
+- Check the raw consumer lag per partition using your live-store consumer group label:
+
+  ```promql
+  tempo_ingest_group_partition_lag{group="<CONSUMER_GROUP>"}
+  ```
+
+  The `group` label is derived from the live-store ring instance ID. For example, in a zone-aware deployment the group might be `live-store-zone-a`.
+
+- If lag is persistent, the live-store may need more resources or partitions may need to be redistributed.
+- To make incomplete results explicit, set `fail_on_high_lag: true` in the [live-store configuration](/docs/tempo/<TEMPO_VERSION>/configuration/#live-store). When enabled, the live-store returns an error instead of silently incomplete results.
+
+## Case 4 - Trace is not recent
+
+Live-stores only serve recent data. Older traces are stored in blocks built by the block-builder. If a trace was ingested but can't be found, the block-builder may not be flushing blocks to the backend correctly.
+
+### Solution
+
+- Check block-builder logs for errors during block creation or flushing to object storage.
+- Verify the block-builder is consuming from Kafka by checking consumer lag metrics.
+- Check the `tempo_block_builder_flushed_blocks` metric to confirm blocks are being written to the backend.
+- Check the `tempo_block_builder_fetch_errors_total` metric for Kafka fetch issues.
 
 ## Diagnose and fix sampling and limits issues
 

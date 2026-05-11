@@ -20,6 +20,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	oteltrace "go.opentelemetry.io/otel/trace"
 	"go.uber.org/multierr"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	livestore_client "github.com/grafana/tempo/modules/livestore/client"
 	"github.com/grafana/tempo/modules/overrides"
@@ -32,7 +34,6 @@ import (
 	"github.com/grafana/tempo/pkg/search"
 	"github.com/grafana/tempo/pkg/tempopb"
 	"github.com/grafana/tempo/pkg/traceql"
-	"github.com/grafana/tempo/pkg/traceqlmetrics"
 	"github.com/grafana/tempo/pkg/util/log"
 	"github.com/grafana/tempo/pkg/validation"
 	"github.com/grafana/tempo/tempodb/backend"
@@ -177,7 +178,7 @@ func (q *Querier) stopping(_ error) error {
 }
 
 // FindTraceByID implements tempopb.Querier.
-func (q *Querier) FindTraceByID(ctx context.Context, req *tempopb.TraceByIDRequest, timeStart int64, timeEnd int64) (*tempopb.TraceByIDResponse, error) {
+func (q *Querier) FindTraceByID(ctx context.Context, req *tempopb.TraceByIDRequest, timeStart, timeEnd time.Time) (*tempopb.TraceByIDResponse, error) {
 	if !validation.ValidTraceID(req.TraceID) {
 		return nil, errors.New("invalid trace id")
 	}
@@ -239,12 +240,11 @@ func (q *Querier) FindTraceByID(ctx context.Context, req *tempopb.TraceByIDReque
 
 	if req.QueryMode == QueryModeBlocks || req.QueryMode == QueryModeAll {
 		span.AddEvent("searching store", oteltrace.WithAttributes(
-			attribute.Int64("timeStart", timeStart),
-			attribute.Int64("timeEnd", timeEnd),
+			attribute.String("timeStart", timeStart.String()),
+			attribute.String("timeEnd", timeEnd.String()),
 		))
 
 		opts := common.DefaultSearchOptionsWithMaxBytes(maxBytes)
-		opts.RF1After = req.RF1After
 
 		partialTraces, blockErrs, err := q.store.Find(ctx, userID, req.TraceID, req.BlockStart, req.BlockEnd, timeStart, timeEnd, opts)
 		if err != nil {
@@ -278,8 +278,8 @@ func (q *Querier) FindTraceByID(ctx context.Context, req *tempopb.TraceByIDReque
 		if req.QueryMode == QueryModeExternal || req.QueryMode == QueryModeAll {
 			span.AddEvent("searching external", oteltrace.WithAttributes(
 				attribute.String("traceID", hex.EncodeToString(req.TraceID)),
-				attribute.Int64("timeStart", timeStart),
-				attribute.Int64("timeEnd", timeEnd),
+				attribute.String("timeStart", timeStart.String()),
+				attribute.String("timeEnd", timeEnd.String()),
 			))
 			externalResp, err := q.externalClient.TraceByID(ctx, userID, req.TraceID, timeStart, timeEnd)
 			if err != nil {
@@ -646,11 +646,23 @@ func (q *Querier) SearchBlock(ctx context.Context, req *tempopb.SearchBlockReque
 	opts.MaxBytes = q.limits.MaxBytesPerTrace(tenantID)
 
 	if api.IsTraceQLQuery(req.SearchReq) {
-		fetcher := traceql.NewSpansetFetcherWrapper(func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansResponse, error) {
-			return q.store.Fetch(ctx, meta, req, opts)
-		})
+		fetcher := traceql.NewSpansetFetcherWrapperBoth(
+			func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansResponse, error) {
+				return q.store.Fetch(ctx, meta, req, opts)
+			},
+			func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansOnlyResponse, error) {
+				return q.store.FetchSpans(ctx, meta, req, opts)
+			},
+		)
 
-		return q.engine.ExecuteSearch(ctx, req.SearchReq, fetcher, q.limits.UnsafeQueryHints(tenantID))
+		var compileOpts []traceql.CompileOption
+		if q.limits.UnsafeQueryHints(tenantID) {
+			compileOpts = append(compileOpts, traceql.WithUnsafeHints(true))
+		}
+		for _, name := range req.SearchReq.SkipASTTransformations {
+			compileOpts = append(compileOpts, traceql.WithSkipOptimization(name))
+		}
+		return q.engine.ExecuteSearch(ctx, req.SearchReq, fetcher, compileOpts...)
 	}
 
 	return q.store.Search(ctx, meta, req.SearchReq, opts)
@@ -693,8 +705,14 @@ func (q *Querier) internalTagsSearchBlockV2(ctx context.Context, req *tempopb.Se
 	opts.StartPage = int(req.StartPage)
 	opts.TotalPages = int(req.PagesToSearch)
 
-	query := traceql.ExtractMatchers(req.SearchReq.Query)
-	if traceql.IsEmptyQuery(query) {
+	conditionGroups, err := traceql.ExtractConditionGroups(req.SearchReq.Query, q.limits.MaxConditionGroupsPerTagQuery())
+	if err != nil {
+		if errors.Is(err, traceql.ErrMaxConditionGroupsPerTagQueryReached) {
+			return nil, status.Errorf(codes.InvalidArgument, "%s", err)
+		}
+		return nil, err
+	}
+	if len(conditionGroups) == 0 {
 		return q.store.SearchTags(ctx, meta, req, opts)
 	}
 
@@ -710,7 +728,7 @@ func (q *Querier) internalTagsSearchBlockV2(ctx context.Context, req *tempopb.Se
 		return nil, fmt.Errorf("unknown scope: %s", req.SearchReq.Scope)
 	}
 
-	err = q.engine.ExecuteTagNames(ctx, scope, query, func(tag string, scope traceql.AttributeScope) bool {
+	err = q.engine.ExecuteTagNames(ctx, scope, conditionGroups, func(tag string, scope traceql.AttributeScope) bool {
 		return valueCollector.Collect(scope.String(), tag)
 	}, fetcher)
 	if err != nil {
@@ -806,8 +824,14 @@ func (q *Querier) internalTagValuesSearchBlockV2(ctx context.Context, req *tempo
 	opts.StartPage = int(req.StartPage)
 	opts.TotalPages = int(req.PagesToSearch)
 
-	query := traceql.ExtractMatchers(req.SearchReq.Query)
-	if traceql.IsEmptyQuery(query) {
+	conditionGroups, err := traceql.ExtractConditionGroups(req.SearchReq.Query, q.limits.MaxConditionGroupsPerTagQuery())
+	if err != nil {
+		if errors.Is(err, traceql.ErrMaxConditionGroupsPerTagQueryReached) {
+			return nil, status.Errorf(codes.InvalidArgument, "%s", err)
+		}
+		return nil, err
+	}
+	if len(conditionGroups) == 0 {
 		return q.store.SearchTagValuesV2(ctx, meta, req.SearchReq, opts)
 	}
 
@@ -826,7 +850,7 @@ func (q *Querier) internalTagValuesSearchBlockV2(ctx context.Context, req *tempo
 		return q.store.FetchTagValues(ctx, meta, req, cb, func(bytesRead uint64) { inspectedBytes += bytesRead }, opts)
 	})
 
-	err = q.engine.ExecuteTagValues(ctx, tag, query, traceql.MakeCollectTagValueFunc(valueCollector.Collect), fetcher)
+	err = q.engine.ExecuteTagValues(ctx, tag, conditionGroups, traceql.MakeCollectTagValueFunc(valueCollector.Collect), fetcher, q.limits.MaxConditionGroupsPerTagQuery())
 	if err != nil {
 		return nil, err
 	}
@@ -883,40 +907,4 @@ func countSpans(trace *tempopb.Trace) int {
 		}
 	}
 	return count
-}
-
-func protoToMetricSeries(proto []*tempopb.KeyValue) traceqlmetrics.MetricSeries {
-	r := traceqlmetrics.MetricSeries{}
-	for i := range proto {
-		r[i] = protoToTraceQLStatic(proto[i])
-	}
-	return r
-}
-
-func protoToTraceQLStatic(kv *tempopb.KeyValue) traceqlmetrics.KeyValue {
-	var val traceql.Static
-
-	switch traceql.StaticType(kv.Value.Type) {
-	case traceql.TypeInt:
-		val = traceql.NewStaticInt(int(kv.Value.N))
-	case traceql.TypeFloat:
-		val = traceql.NewStaticFloat(kv.Value.F)
-	case traceql.TypeString:
-		val = traceql.NewStaticString(kv.Value.S)
-	case traceql.TypeBoolean:
-		val = traceql.NewStaticBool(kv.Value.B)
-	case traceql.TypeDuration:
-		val = traceql.NewStaticDuration(time.Duration(kv.Value.D))
-	case traceql.TypeStatus:
-		val = traceql.NewStaticStatus(traceql.Status(kv.Value.Status))
-	case traceql.TypeKind:
-		val = traceql.NewStaticKind(traceql.Kind(kv.Value.Kind))
-	default:
-		val = traceql.NewStaticNil()
-	}
-
-	return traceqlmetrics.KeyValue{
-		Key:   kv.Key,
-		Value: val,
-	}
 }

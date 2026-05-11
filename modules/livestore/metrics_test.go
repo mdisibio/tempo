@@ -1,7 +1,6 @@
 package livestore
 
 import (
-	"context"
 	"flag"
 	"testing"
 	"time"
@@ -16,6 +15,7 @@ import (
 	"github.com/grafana/tempo/modules/overrides"
 	"github.com/grafana/tempo/pkg/tempopb"
 	"github.com/grafana/tempo/pkg/util/test"
+	"github.com/grafana/tempo/tempodb/encoding"
 	"github.com/grafana/tempo/tempodb/wal"
 )
 
@@ -46,17 +46,24 @@ func setupTest(t *testing.T) *testSetup {
 	cfg := &Config{}
 	cfg.RegisterFlagsAndApplyDefaults("", &flag.FlagSet{})
 
-	blockEnc, walEnc, err := coalesceBlockVersions(cfg)
-	require.NoError(t, err)
+	// Use the default encoding for tests
+	blockEnc := encoding.DefaultEncoding()
+
+	// Populate block config with defaults, simulating what modules.go does by injecting storage.trace.block.
+	cfg.BlockConfig.RegisterFlagsAndApplyDefaults("", &flag.FlagSet{})
+	cfg.BlockConfig.Version = blockEnc.Version()
+	cfg.WAL.Version = blockEnc.Version()
 
 	// Setup WAL config
 	w, err := wal.New(&wal.Config{
 		Filepath: tmpDir,
-		Version:  walEnc.Version(),
+		Version:  blockEnc.Version(),
 	})
 	require.NoError(t, err)
 
-	instance, err := newInstance(testTenant, *cfg, w, blockEnc, o, log.NewNopLogger())
+	lifecycle, err := newCompleteBlockLifecycle(*cfg, noopCompleteBlockFlusher{}, log.NewNopLogger())
+	require.NoError(t, err)
+	instance, err := newInstance(testTenant, *cfg, w, blockEnc, lifecycle, o, log.NewNopLogger())
 	require.NoError(t, err)
 
 	return &testSetup{
@@ -130,8 +137,9 @@ func TestMetrics_PushBytesTracking(t *testing.T) {
 		"bytes received should increase by trace data size")
 
 	// Check live traces metric after cutting
-	err = setup.instance.cutIdleTraces(true) // immediate cut
+	drained, err := setup.instance.cutIdleTraces(t.Context(), true) // immediate cut
 	require.NoError(t, err)
+	require.True(t, drained, "should drain live traces in one iteration")
 
 	// Verify traces were created
 	finalTracesCreated, err := test.GetCounterValue(setup.instance.tracesCreatedTotal)
@@ -157,11 +165,12 @@ func TestMetrics_CompletionFlow(t *testing.T) {
 	setup.instance.pushBytes(t.Context(), time.Now(), req)
 
 	// Cut traces to head block
-	err = setup.instance.cutIdleTraces(true)
+	drained, err := setup.instance.cutIdleTraces(t.Context(), true)
 	require.NoError(t, err)
+	require.True(t, drained, "should drain live traces in one iteration")
 
 	// Cut block to prepare for completion
-	blockID, err := setup.instance.cutBlocks(true)
+	blockID, err := setup.instance.cutBlocks(t.Context(), true)
 	require.NoError(t, err)
 	assert.NotEqual(t, uuid.Nil, blockID, "should generate a valid block ID")
 
@@ -169,7 +178,7 @@ func TestMetrics_CompletionFlow(t *testing.T) {
 	initialCompletionSize := getHistogramCount(t, metricCompletionSize)
 
 	// Complete the block
-	err = setup.instance.completeBlock(context.Background(), blockID)
+	_, err = setup.instance.completeBlock(t.Context(), blockID)
 	require.NoError(t, err)
 
 	// Verify completion size metric was updated

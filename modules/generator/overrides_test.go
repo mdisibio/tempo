@@ -29,12 +29,6 @@ type mockOverrides struct {
 	spanMetricsEnableTargetInfo                        *bool
 	spanMetricsTargetInfoExcludedDimensions            []string
 	spanMetricsEnableInstanceLabel                     *bool
-	localBlocksMaxLiveTraces                           uint64
-	localBlocksMaxBlockDuration                        time.Duration
-	localBlocksMaxBlockBytes                           uint64
-	localBlocksFlushCheckPeriod                        time.Duration
-	localBlocksTraceIdlePeriod                         time.Duration
-	localBlocksCompleteBlockTimeout                    time.Duration
 	dedicatedColumns                                   backend.DedicatedColumns
 	maxLocalTraces                                     int
 	maxBytesPerTrace                                   int
@@ -43,7 +37,9 @@ type mockOverrides struct {
 	hostInfoHostIdentifiers                            []string
 	hostInfoMetricName                                 string
 	serviceGraphsSpanMultiplierKey                     string
+	serviceGraphsEnableTraceStateSpanMultiplier        *bool
 	spanMetricsSpanMultiplierKey                       string
+	spanMetricsEnableTraceStateSpanMultiplier          *bool
 }
 
 var _ metricsGeneratorOverrides = (*mockOverrides)(nil)
@@ -114,30 +110,6 @@ func (m *mockOverrides) MetricsGeneratorProcessorSpanMetricsIntrinsicDimensions(
 
 func (m *mockOverrides) MetricsGeneratorProcessorSpanMetricsFilterPolicies(string) []filterconfig.FilterPolicy {
 	return m.spanMetricsFilterPolicies
-}
-
-func (m *mockOverrides) MetricsGeneratorProcessorLocalBlocksMaxLiveTraces(string) uint64 {
-	return m.localBlocksMaxLiveTraces
-}
-
-func (m *mockOverrides) MetricsGeneratorProcessorLocalBlocksMaxBlockDuration(string) time.Duration {
-	return m.localBlocksMaxBlockDuration
-}
-
-func (m *mockOverrides) MetricsGeneratorProcessorLocalBlocksMaxBlockBytes(string) uint64 {
-	return m.localBlocksMaxBlockBytes
-}
-
-func (m *mockOverrides) MetricsGeneratorProcessorLocalBlocksTraceIdlePeriod(string) time.Duration {
-	return m.localBlocksTraceIdlePeriod
-}
-
-func (m *mockOverrides) MetricsGeneratorProcessorLocalBlocksFlushCheckPeriod(string) time.Duration {
-	return m.localBlocksFlushCheckPeriod
-}
-
-func (m *mockOverrides) MetricsGeneratorProcessorLocalBlocksCompleteBlockTimeout(string) time.Duration {
-	return m.localBlocksCompleteBlockTimeout
 }
 
 // MetricsGeneratorProcessorSpanMetricsDimensionMappings controls custom dimension mapping
@@ -234,6 +206,20 @@ func (m *mockOverrides) MetricsGeneratorProcessorServiceGraphsSpanMultiplierKey(
 	return m.serviceGraphsSpanMultiplierKey
 }
 
+func (m *mockOverrides) MetricsGeneratorProcessorServiceGraphsEnableTraceStateSpanMultiplier(string) (bool, bool) {
+	if m.serviceGraphsEnableTraceStateSpanMultiplier != nil {
+		return *m.serviceGraphsEnableTraceStateSpanMultiplier, true
+	}
+	return false, false
+}
+
 func (m *mockOverrides) MetricsGeneratorProcessorSpanMetricsSpanMultiplierKey(string) string {
 	return m.spanMetricsSpanMultiplierKey
+}
+
+func (m *mockOverrides) MetricsGeneratorProcessorSpanMetricsEnableTraceStateSpanMultiplier(string) (bool, bool) {
+	if m.spanMetricsEnableTraceStateSpanMultiplier != nil {
+		return *m.spanMetricsEnableTraceStateSpanMultiplier, true
+	}
+	return false, false
 }

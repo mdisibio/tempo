@@ -42,9 +42,8 @@
       containerPort.new('otlp', 4317),
     ]) +
     container.withArgs([
-      '-target=scalable-single-binary',
+      '-target=all',
       '-config.file=/conf/tempo.yaml',
-      '-mem-ballast-size-mbs=' + $._config.ballast_size_mbs,
     ]) +
     container.withVolumeMounts([
       volumeMount.new(tempo_config_volume, '/conf'),

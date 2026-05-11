@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -21,7 +22,6 @@ import (
 	"github.com/grafana/dskit/server"
 	"github.com/grafana/dskit/services"
 	"github.com/grafana/tempo/modules/livestore"
-	jsoniter "github.com/json-iterator/go"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
@@ -57,7 +57,6 @@ const (
 	Server         string = "server"
 	InternalServer string = "internal-server"
 	Store          string = "store"
-	OptionalStore  string = "optional-store"
 	MemberlistKV   string = "memberlist-kv"
 	UsageReport    string = "usage-report"
 	Overrides      string = "overrides"
@@ -65,7 +64,6 @@ const (
 	CacheProvider  string = "cache-provider"
 
 	// rings
-	MetricsGeneratorRing string = "metrics-generator-ring"
 	LiveStoreRing        string = "live-store-ring"
 	PartitionRing        string = "partition-ring"
 	GeneratorRingWatcher string = "generator-ring-watcher"
@@ -85,8 +83,7 @@ const (
 	SingleBinary string = "all"
 
 	// ring names
-	ringMetricsGenerator string = "metrics-generator"
-	ringLiveStore        string = "live-store"
+	ringLiveStore string = "live-store"
 )
 
 func IsSingleBinary(target string) bool {
@@ -96,6 +93,7 @@ func IsSingleBinary(target string) bool {
 func (t *App) initServer() (services.Service, error) {
 	t.cfg.Server.MetricsNamespace = metricsNamespace
 	t.cfg.Server.ExcludeRequestInLog = true
+	t.cfg.Server.MetricsNativeHistogramFactor = 1.1
 
 	if t.cfg.EnableGoRuntimeMetrics {
 		// unregister default Go collector
@@ -153,10 +151,6 @@ func (t *App) initInternalServer() (services.Service, error) {
 	s := NewServerService(t.InternalServer, servicesToWaitFor)
 
 	return s, nil
-}
-
-func (t *App) initGeneratorRing() (services.Service, error) {
-	return t.initReadRing(t.cfg.Generator.Ring.ToRingConfig(), ringMetricsGenerator, t.cfg.Generator.OverrideRingKey)
 }
 
 func (t *App) initLiveStoreRing() (services.Service, error) {
@@ -249,17 +243,35 @@ func (t *App) initOverridesAPI() (services.Service, error) {
 }
 
 func (t *App) initDistributor() (services.Service, error) {
-	t.cfg.Distributor.KafkaConfig = t.cfg.Ingest.Kafka
-	t.cfg.Distributor.IngesterWritePathEnabled = false
-	t.cfg.Distributor.KafkaWritePathEnabled = t.cfg.Ingest.Enabled // TODO: Don't mix config params
+	singleBinary := IsSingleBinary(t.cfg.Target)
+	localPushTargets := distributor.LocalPushTargets{}
+	var partitionRing ring.PartitionRingReader
+
+	t.cfg.Distributor.PushSpansToKafka = !singleBinary
+
+	if singleBinary {
+		localPushTargets.Generator = func(ctx context.Context, req *tempopb.PushSpansRequest) (*tempopb.PushResponse, error) {
+			if t.generator == nil {
+				return nil, errors.New("metrics-generator not initialized")
+			}
+			return t.generator.PushSpans(ctx, req)
+		}
+
+		localPushTargets.LiveStore = func(ctx context.Context, req *tempopb.PushBytesRequest) (*tempopb.PushResponse, error) {
+			if t.liveStore == nil {
+				return nil, errors.New("live-store not initialized")
+			}
+			return t.liveStore.PushBytes(ctx, req)
+		}
+	} else {
+		t.cfg.Distributor.KafkaConfig = t.cfg.Ingest.Kafka
+		partitionRing = t.partitionRing
+	}
 
 	// todo: make write-path client a module instead of passing the config everywhere
 	distributor, err := distributor.New(t.cfg.Distributor,
-		t.cfg.IngesterClient,
-		t.readRings[ringLiveStore],
-		t.cfg.GeneratorClient,
-		t.readRings[ringMetricsGenerator],
-		t.partitionRing,
+		localPushTargets,
+		partitionRing,
 		t.Overrides,
 		t.TracesConsumerMiddleware,
 		log.Logger, t.cfg.Server.LogLevel, prometheus.DefaultRegisterer)
@@ -280,18 +292,15 @@ func (t *App) initDistributor() (services.Service, error) {
 }
 
 func (t *App) initGenerator() (services.Service, error) {
-	if t.cfg.Generator.Processor.LocalBlocks.FlushToStorage &&
-		t.store == nil {
-		return nil, fmt.Errorf("generator.processor.local-blocks.flush-to-storage is enabled but no storage backend is configured")
+	t.configureGenerator()
+
+	ringReader, err := t.generatorRingReader()
+	if err != nil {
+		return nil, err
 	}
 
-	t.cfg.Generator.Ring.ListenPort = t.cfg.Server.GRPCListenPort
-
-	t.cfg.Generator.Ingest = t.cfg.Ingest
-	t.cfg.Generator.Ingest.Kafka.ConsumerGroup = generator.ConsumerGroup
-
-	genSvc, err := generator.New(&t.cfg.Generator, t.Overrides, prometheus.DefaultRegisterer, t.partitionRing, t.store, log.Logger)
-	if errors.Is(err, generator.ErrUnconfigured) && t.cfg.Target != MetricsGenerator { // just warn if we're not running the metrics-generator
+	genSvc, err := generator.New(&t.cfg.Generator, t.Overrides, prometheus.DefaultRegisterer, ringReader, log.Logger)
+	if errors.Is(err, generator.ErrUnconfigured) && t.cfg.Target != MetricsGenerator && t.cfg.Target != MetricsGeneratorNoLocalBlocks { // just warn if we're not running the metrics-generator
 		level.Warn(log.Logger).Log("msg", "metrics-generator is not configured.", "err", err)
 		return services.NewIdleService(nil, nil), nil
 	}
@@ -300,48 +309,53 @@ func (t *App) initGenerator() (services.Service, error) {
 	}
 	t.generator = genSvc
 
-	spanStatsHandler := t.HTTPAuthMiddleware.Wrap(http.HandlerFunc(t.generator.SpanMetricsHandler))
-	t.Server.HTTPRouter().Handle(path.Join(api.PathPrefixGenerator, addHTTPAPIPrefix(&t.cfg, api.PathSpanMetrics)), spanStatsHandler)
+	return t.generator, nil
+}
 
-	queryRangeHandler := t.HTTPAuthMiddleware.Wrap(http.HandlerFunc(t.generator.QueryRangeHandler))
-	t.Server.HTTPRouter().Handle(path.Join(api.PathPrefixGenerator, addHTTPAPIPrefix(&t.cfg, api.PathMetricsQueryRange)), queryRangeHandler)
+func (t *App) configureGenerator() {
+	t.cfg.Generator.Ingest = t.cfg.Ingest
+	t.cfg.Generator.ConsumeFromKafka = !IsSingleBinary(t.cfg.Target)
+	if t.cfg.Generator.ConsumeFromKafka && t.cfg.Generator.RingMode == generator.RingModePartition {
+		t.cfg.Generator.Ingest.Kafka.ConsumerGroup = generator.ConsumerGroup
+	}
+}
 
-	if !IsSingleBinary(t.cfg.Target) {
-		tempopb.RegisterMetricsGeneratorServer(t.Server.GRPC(), t.generator) // todo: this can be removed before 3.0 but needs to exist as long as we have any deployments anywhere on the traditional arch
+func (t *App) generatorRingReader() (ring.PartitionRingReader, error) {
+	if IsSingleBinary(t.cfg.Target) {
+		return nil, nil
 	}
 
-	return t.generator, nil
+	switch t.cfg.Generator.RingMode {
+	case generator.RingModePartition:
+		if t.partitionRing == nil {
+			return nil, errors.New("metrics-generator ring mode is partition but partition ring is not initialized")
+		}
+		return t.partitionRing, nil
+	case generator.RingModeGenerator:
+		if t.generatorRingWatcher == nil {
+			return nil, errors.New("metrics-generator ring mode is generator but generator ring watcher is not initialized")
+		}
+		return t.generatorRingWatcher, nil
+	default:
+		return nil, fmt.Errorf(
+			"invalid metrics-generator ring mode %q, must be one of: %q, %q",
+			t.cfg.Generator.RingMode,
+			generator.RingModePartition,
+			generator.RingModeGenerator,
+		)
+	}
 }
 
 func (t *App) initGeneratorNoLocalBlocks() (services.Service, error) {
-	reg := prometheus.DefaultRegisterer
-
-	t.cfg.Generator.Ingest = t.cfg.Ingest
-
-	// In this mode, the generator runs as a stateless queue consumer that reads from
-	// Kafka and remote writes to a Prometheus-compatible metrics store.
-	if !t.cfg.Ingest.Enabled {
-		return nil, errors.New("ingest storage must be enabled to run metrics generator in this mode")
-	}
-	// The localblocks processor is disabled in this mode.
-	t.cfg.Generator.DisableLocalBlocks = true
-	// The store is used only by the localblocks processor. We don't need it when
-	// running with that processor disabled so we keep the default zero value.
-	var store tempo_storage.Store
-	// In this mode, the generator does not need to become available to serve
-	// queries, so we can skip setting up a gRPC server.
-	t.cfg.Generator.DisableGRPC = true
-
-	var err error
-	t.generator, err = generator.New(&t.cfg.Generator, t.Overrides, reg, t.generatorRingWatcher, store, log.Logger)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create metrics-generator: %w", err)
-	}
-
-	return t.generator, nil
+	t.cfg.Generator.RingMode = generator.RingModeGenerator
+	return t.initGenerator()
 }
 
 func (t *App) initGeneratorRingWatcher() (services.Service, error) {
+	if IsSingleBinary(t.cfg.Target) || t.cfg.Generator.RingMode != generator.RingModeGenerator {
+		return services.NewIdleService(nil, nil), nil
+	}
+
 	reg := prometheus.DefaultRegisterer
 
 	kvRegisterer := kv.RegistererWithKVName(reg, t.cfg.Generator.OverrideRingKey+"-watcher")
@@ -367,13 +381,11 @@ func (t *App) initGeneratorRingWatcher() (services.Service, error) {
 }
 
 func (t *App) initBlockBuilder() (services.Service, error) {
-	if !t.cfg.Ingest.Enabled {
-		return services.NewIdleService(nil, nil), nil
-	}
-
 	t.cfg.BlockBuilder.IngestStorageConfig = t.cfg.Ingest
 	t.cfg.BlockBuilder.IngestStorageConfig.Kafka.ConsumerGroup = blockbuilder.ConsumerGroup
-	t.cfg.BlockBuilder.GlobalBlockConfig = t.cfg.StorageConfig.Trace.Block
+	// Block config and WAL version are always sourced from storage.trace.block.
+	t.cfg.BlockBuilder.BlockConfig.BlockConfig = *t.cfg.StorageConfig.Trace.Block
+	t.cfg.BlockBuilder.WAL.Version = t.cfg.StorageConfig.Trace.Block.Version
 
 	if IsSingleBinary(t.cfg.Target) && len(t.cfg.BlockBuilder.AssignedPartitionsMap) == 0 {
 		// In SingleBinary mode always use partition 0. This is for small installs or local/debugging setups.
@@ -519,16 +531,6 @@ func (t *App) initQueryFrontend() (services.Service, error) {
 
 //go:embed static
 var staticFiles embed.FS
-
-func (t *App) initOptionalStore() (services.Service, error) {
-	// Used by the local-blocs processor to flush RF1 blocks to storage.
-	// Only initialize if it's configured.
-	if t.cfg.StorageConfig.Trace.Backend == "" {
-		return services.NewIdleService(nil, nil), nil
-	}
-
-	return t.initStore()
-}
 
 func (t *App) initStore() (services.Service, error) {
 	// the only component that needs a functioning tempodb pool are the queriers. all other components will just spin up
@@ -696,28 +698,25 @@ func (t *App) initBackendWorker() (services.Service, error) {
 }
 
 func (t *App) initLiveStore() (services.Service, error) {
-	if !t.cfg.Ingest.Enabled {
-		return services.NewIdleService(nil, nil), nil
-	}
-
-	// In SingleBinary mode don't try to discover partition from host name.
-	// Always use partition 0. This is for small installs or local/debugging setups.
-	singlePartition := IsSingleBinary(t.cfg.Target)
+	// In single-binary mode traces are pushed in-process from distributor,
+	// so live-store does not consume directly from Kafka.
+	t.cfg.LiveStore.ConsumeFromKafka = !IsSingleBinary(t.cfg.Target)
 
 	// Inject config from other locations.
 	t.cfg.LiveStore.IngestConfig = t.cfg.Ingest
 	t.cfg.LiveStore.Ring.ListenPort = t.cfg.Server.GRPCListenPort
-	t.cfg.LiveStore.GlobalBlockConfig = t.cfg.StorageConfig.Trace.Block
+	// Block config and WAL version are always sourced from storage.trace.block.
+	t.cfg.LiveStore.BlockConfig = *t.cfg.StorageConfig.Trace.Block
+	t.cfg.LiveStore.WAL.Version = t.cfg.StorageConfig.Trace.Block.Version
 
 	var err error
-	t.liveStore, err = livestore.New(t.cfg.LiveStore, t.Overrides, log.Logger, prometheus.DefaultRegisterer, singlePartition)
+	t.liveStore, err = livestore.New(t.cfg.LiveStore, t.Overrides, t.store, log.Logger, prometheus.DefaultRegisterer)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create liveStore: %w", err)
 	}
 
 	tempopb.RegisterQuerierServer(t.Server.GRPC(), t.liveStore)
 	tempopb.RegisterMetricsServer(t.Server.GRPC(), t.liveStore)
-	tempopb.RegisterMetricsGeneratorServer(t.Server.GRPC(), t.liveStore)
 
 	t.Server.HTTPRouter().Methods(http.MethodGet, http.MethodPost, http.MethodDelete).
 		Path("/live-store/prepare-partition-downscale").
@@ -736,7 +735,6 @@ func (t *App) setupModuleManager() error {
 	const Common = "common"
 
 	mm.RegisterModule(Store, t.initStore, modules.UserInvisibleModule)
-	mm.RegisterModule(OptionalStore, t.initOptionalStore, modules.UserInvisibleModule)
 	mm.RegisterModule(Server, t.initServer, modules.UserInvisibleModule)
 	mm.RegisterModule(InternalServer, t.initInternalServer, modules.UserInvisibleModule)
 	mm.RegisterModule(MemberlistKV, t.initMemberlistKV, modules.UserInvisibleModule)
@@ -744,7 +742,6 @@ func (t *App) setupModuleManager() error {
 	mm.RegisterModule(OverridesAPI, t.initOverridesAPI)
 	mm.RegisterModule(UsageReport, t.initUsageReport)
 	mm.RegisterModule(CacheProvider, t.initCacheProvider, modules.UserInvisibleModule)
-	mm.RegisterModule(MetricsGeneratorRing, t.initGeneratorRing, modules.UserInvisibleModule)
 	mm.RegisterModule(GeneratorRingWatcher, t.initGeneratorRingWatcher, modules.UserInvisibleModule)
 	mm.RegisterModule(LiveStoreRing, t.initLiveStoreRing, modules.UserInvisibleModule)
 	mm.RegisterModule(PartitionRing, t.initPartitionRing, modules.UserInvisibleModule)
@@ -763,6 +760,19 @@ func (t *App) setupModuleManager() error {
 
 	mm.RegisterModule(SingleBinary, nil)
 
+	liveStoreDeps := []string{Common, MemberlistKV, PartitionRing}
+	distributorDeps := []string{Common, LiveStoreRing, PartitionRing}
+	generatorDeps := []string{Common, MemberlistKV, PartitionRing, GeneratorRingWatcher}
+
+	if IsSingleBinary(t.cfg.Target) {
+		// In single-binary mode the distributor calls the live-store and metrics-generator in-process.
+		// Make those runtime dependencies explicit in the module DAG instead of relying on sibling
+		// initialization under the composite target.
+		distributorDeps = []string{Common, LiveStore, MetricsGenerator}
+		generatorDeps = []string{Common}
+		liveStoreDeps = append(liveStoreDeps, Store)
+	}
+
 	deps := map[string][]string{
 		// InternalServer: nil,
 		// CacheProvider:  nil,
@@ -772,7 +782,6 @@ func (t *App) setupModuleManager() error {
 		OverridesAPI:         {Server, Overrides},
 		MemberlistKV:         {Server},
 		UsageReport:          {MemberlistKV},
-		MetricsGeneratorRing: {Server, MemberlistKV},
 		LiveStoreRing:        {Server, MemberlistKV},
 		PartitionRing:        {MemberlistKV, Server, LiveStoreRing},
 		GeneratorRingWatcher: {MemberlistKV},
@@ -781,17 +790,16 @@ func (t *App) setupModuleManager() error {
 
 		// individual targets
 		QueryFrontend:                 {Common, Store, OverridesAPI},
-		Distributor:                   {Common, LiveStoreRing, MetricsGeneratorRing, PartitionRing},
-		MetricsGenerator:              {Common, OptionalStore, MemberlistKV, PartitionRing},
-		MetricsGeneratorNoLocalBlocks: {Common, GeneratorRingWatcher},
+		Distributor:                   distributorDeps,
+		LiveStore:                     liveStoreDeps,
+		MetricsGenerator:              generatorDeps,
+		MetricsGeneratorNoLocalBlocks: {Common, MemberlistKV, GeneratorRingWatcher},
 		Querier:                       {Common, Store, LiveStoreRing, PartitionRing},
 		BlockBuilder:                  {Common, Store, MemberlistKV, PartitionRing},
 		BackendScheduler:              {Common, Store},
 		BackendWorker:                 {Common, Store, MemberlistKV},
-		LiveStore:                     {Common, MemberlistKV, PartitionRing},
-
 		// composite targets
-		SingleBinary: {BackendScheduler, BackendWorker, QueryFrontend, Querier, Distributor, MetricsGenerator, BlockBuilder, LiveStore},
+		SingleBinary: {BackendScheduler, BackendWorker, QueryFrontend, Querier, Distributor, MetricsGenerator, LiveStore},
 	}
 
 	for mod, targets := range deps {
@@ -801,7 +809,6 @@ func (t *App) setupModuleManager() error {
 	}
 
 	t.ModuleManager = mm
-
 	t.deps = deps
 
 	return nil
@@ -850,12 +857,13 @@ func usageStatsHandler(urCfg usagestats.Config) http.HandlerFunc {
 	}
 
 	// usage stats is Enabled, build and return usage stats json
-	reportStr, err := jsoniter.MarshalToString(usagestats.BuildStats())
+	reportBytes, err := json.Marshal(usagestats.BuildStats())
 	if err != nil {
 		return func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "error building usage report", http.StatusInternalServerError)
 		}
 	}
+	reportStr := string(reportBytes)
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

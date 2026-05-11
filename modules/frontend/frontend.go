@@ -120,14 +120,13 @@ func New(cfg Config, next pipeline.RoundTripper, o overrides.Interface, reader t
 	}
 
 	jobsPerQuery := promauto.With(registerer).NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "tempo_query_frontend_jobs_per_query",
-		Help:    "Number of planned jobs per query in the query frontend.",
-		Buckets: prometheus.ExponentialBuckets(1, 10, 7),
+		Name:                            "tempo_query_frontend_jobs_per_query",
+		Help:                            "Number of planned jobs per query in the query frontend.",
+		Buckets:                         prometheus.ExponentialBuckets(1, 10, 7),
+		NativeHistogramBucketFactor:     1.1,
+		NativeHistogramMaxBucketNumber:  100,
+		NativeHistogramMinResetDuration: 1 * time.Hour,
 	}, []string{"op"})
-
-	// Propagate RF1After to search and traceByID sharders
-	cfg.Search.Sharder.RF1After = cfg.RF1After
-	cfg.TraceByID.RF1After = cfg.RF1After
 
 	adjustEndWareSeconds := pipeline.NewAdjustStartEndWare(cfg.Search.Sharder.QueryBackendAfter, cfg.QueryEndCutoff, false)
 	adjustEndWareNanos := pipeline.NewAdjustStartEndWare(cfg.Metrics.Sharder.QueryBackendAfter, cfg.QueryEndCutoff, true) // metrics queries work in nanoseconds
@@ -147,7 +146,7 @@ func New(cfg Config, next pipeline.RoundTripper, o overrides.Interface, reader t
 			pipeline.NewWeightRequestWare(pipeline.TraceByID, cfg.Weights),
 			multiTenantMiddleware(cfg, logger),
 			tenantValidatorWare,
-			newAsyncTraceIDSharder(&cfg.TraceByID, jobsPerQuery, logger),
+			newAsyncTraceIDSharder(&cfg.TraceByID, cfg.Config.MaxOutstandingPerTenant, reader, jobsPerQuery, logger),
 		},
 		[]pipeline.Middleware{traceIDStatusCodeWare, retryWare},
 		next)
@@ -161,7 +160,7 @@ func New(cfg Config, next pipeline.RoundTripper, o overrides.Interface, reader t
 			pipeline.NewWeightRequestWare(pipeline.TraceQLSearch, cfg.Weights),
 			multiTenantMiddleware(cfg, logger),
 			tenantValidatorWare,
-			newAsyncSearchSharder(reader, o, cfg.Search.Sharder, jobsPerQuery, logger),
+			newAsyncSearchSharder(reader, o, cfg.Search.Sharder, cfg.SkipASTTransformations, jobsPerQuery, logger),
 		},
 		[]pipeline.Middleware{cacheWare, statusCodeWare, retryWare},
 		next)
@@ -217,7 +216,7 @@ func New(cfg Config, next pipeline.RoundTripper, o overrides.Interface, reader t
 			pipeline.NewWeightRequestWare(pipeline.TraceQLMetrics, cfg.Weights),
 			multiTenantMiddleware(cfg, logger),
 			tenantValidatorWare,
-			newAsyncQueryRangeSharder(reader, o, cfg.Metrics.Sharder, false, jobsPerQuery, logger),
+			newAsyncQueryRangeSharder(reader, o, cfg.Metrics.Sharder, cfg.SkipASTTransformations, false, jobsPerQuery, logger),
 		},
 		[]pipeline.Middleware{cacheWare, statusCodeWare, retryWare},
 		next)
@@ -231,7 +230,7 @@ func New(cfg Config, next pipeline.RoundTripper, o overrides.Interface, reader t
 			pipeline.NewWeightRequestWare(pipeline.TraceQLMetrics, cfg.Weights),
 			multiTenantMiddleware(cfg, logger),
 			tenantValidatorWare,
-			newAsyncQueryRangeSharder(reader, o, cfg.Metrics.Sharder, true, jobsPerQuery, logger),
+			newAsyncQueryRangeSharder(reader, o, cfg.Metrics.Sharder, cfg.SkipASTTransformations, true, jobsPerQuery, logger),
 		},
 		[]pipeline.Middleware{cacheWare, statusCodeWare, retryWare},
 		next)
@@ -377,7 +376,7 @@ func blockMetasForSearch(allBlocks []*backend.BlockMeta, start, end time.Time, f
 		// block start is before or equal to search end AND block end is after or equal to search start
 		if !m.StartTime.After(end) && // block start <= search end
 			!m.EndTime.Before(start) && // block end >= search start
-			filterFn(m) { // This check skips generator blocks (RF=1)
+			filterFn(m) {
 			blocks = append(blocks, m)
 		}
 	}

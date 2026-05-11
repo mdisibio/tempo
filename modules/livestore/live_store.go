@@ -28,6 +28,8 @@ import (
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -45,7 +47,10 @@ const (
 	droppedRecordReasonInstanceNotFound = "instance_not_found"
 )
 
-var ErrStarting = errors.New("live-store is starting")
+var (
+	ErrStarting = errors.New("live-store is starting")
+	ErrStopping = errors.New("live-store is stopping")
+)
 
 var (
 	// Queue management metrics
@@ -111,6 +116,12 @@ var (
 		Name:      "ready",
 		Help:      "1 if ready to serve queries, 0 otherwise",
 	})
+
+	metricLaggedRequests = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "tempo_live_store",
+		Name:      "lagged_requests_total",
+		Help:      "Requests where the live-store could not guarantee complete results due to Kafka lag.",
+	}, []string{"route"})
 )
 
 type LiveStore struct {
@@ -132,11 +143,12 @@ type LiveStore struct {
 	reader *PartitionReader
 
 	// Multi-tenant instances
-	instancesMtx          sync.RWMutex
-	instances             map[string]*instance
-	wal                   *wal.WAL
-	completeBlockEncoding encoding.VersionedEncoding
-	overrides             overrides.Interface
+	instancesMtx           sync.RWMutex
+	instances              map[string]*instance
+	wal                    *wal.WAL
+	completeBlockEncoding  encoding.VersionedEncoding
+	completeBlockLifecycle completeBlockLifecycle
+	overrides              overrides.Interface
 
 	// Background processing
 	ctx                 context.Context // context for the service. all background processes should exit if this is cancelled
@@ -147,29 +159,38 @@ type LiveStore struct {
 	lagCancel           context.CancelFunc
 	readyErr            atomic.Pointer[error] // nil when ready to serve queries
 	lastRecordTimeNanos atomic.Int64          // stores timestamp of last consumed record as UnixNano, -1 means not set
+
+	cutToWalStop chan struct{}  // closed to stop perTenantCutToWalLoop goroutines before shutdown flush
+	cutToWalWg   sync.WaitGroup // tracks active perTenantCutToWalLoop goroutines
 }
 
-func New(cfg Config, overridesService overrides.Interface, logger log.Logger, reg prometheus.Registerer, singlePartition bool) (*LiveStore, error) {
-	completeBlockEncoding, walEncoding, encErr := coalesceBlockVersions(&cfg)
+func New(cfg Config, overridesService overrides.Interface, completeBlockFlusher completeBlockFlusher, logger log.Logger, reg prometheus.Registerer) (*LiveStore, error) {
+	completeBlockEncoding, encErr := encoding.FromVersionForWrites(cfg.BlockConfig.Version)
 	if encErr != nil {
-		return nil, encErr
+		return nil, fmt.Errorf("block version validation failed: %w", encErr)
 	}
-	cfg.WAL.Version = walEncoding.Version()
+
+	completeBlockLifecycle, lifecycleErr := newCompleteBlockLifecycle(cfg, completeBlockFlusher, logger)
+	if lifecycleErr != nil {
+		return nil, fmt.Errorf("create complete block lifecycle: %w", lifecycleErr)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
 	s := &LiveStore{
-		cfg:                   cfg,
-		logger:                logger,
-		reg:                   reg,
-		decoder:               ingest.NewDecoder(),
-		completeBlockEncoding: completeBlockEncoding,
-		ctx:                   ctx,
-		cancel:                cancel,
-		instances:             make(map[string]*instance),
-		overrides:             overridesService,
-		completeQueues:        flushqueues.New[*completeOp](cfg.CompleteBlockConcurrency, metricCompleteQueueLength),
-		startupComplete:       make(chan struct{}),
+		cfg:                    cfg,
+		logger:                 logger,
+		reg:                    reg,
+		decoder:                ingest.NewDecoder(),
+		completeBlockEncoding:  completeBlockEncoding,
+		ctx:                    ctx,
+		cancel:                 cancel,
+		instances:              make(map[string]*instance),
+		overrides:              overridesService,
+		completeBlockLifecycle: completeBlockLifecycle,
+		completeQueues:         flushqueues.New[*completeOp](metricCompleteQueueLength),
+		startupComplete:        make(chan struct{}),
+		cutToWalStop:           make(chan struct{}),
 	}
 
 	// Initialize ready state to starting
@@ -178,20 +199,12 @@ func New(cfg Config, overridesService overrides.Interface, logger log.Logger, re
 	s.lastRecordTimeNanos.Store(-1)
 
 	var err error
-	if singlePartition {
-		// For single-binary don't require hostname to identify a partition.
-		// Assume partition 0.
-		s.ingestPartitionID = 0
-	} else {
+	if cfg.ConsumeFromKafka {
 		s.ingestPartitionID, err = ingest.IngesterPartitionID(cfg.Ring.InstanceID)
 		if err != nil {
 			return nil, fmt.Errorf("calculating livestore partition ID: %w", err)
 		}
-	}
 
-	if singlePartition {
-		s.cfg.IngestConfig.Kafka.ConsumerGroup = "live-store-zone-a"
-	} else {
 		// TODO: It's probably easier to just use the ID directly
 		//  https://raintank-corp.slack.com/archives/C05CAA0ULUF/p1752847274420489
 		s.cfg.IngestConfig.Kafka.ConsumerGroup, err = ingest.LiveStoreConsumerGroupID(cfg.Ring.InstanceID)
@@ -286,16 +299,20 @@ func (s *LiveStore) starting(ctx context.Context) error {
 		return fmt.Errorf("failed to reload blocks from wal: %w", err)
 	}
 
+	level.Info(s.logger).Log("msg", "deleting old blocks")
 	for _, inst := range s.getInstances() {
 		err = inst.deleteOldBlocks()
 		if err != nil {
 			level.Warn(s.logger).Log("msg", "failed to delete old blocks", "err", err, "tenant", inst.tenantID)
 		}
 	}
+	level.Info(s.logger).Log("msg", "done deleting old blocks")
 
-	forceFromLookback := len(s.getInstances()) == 0
-	if forceFromLookback {
-		level.Info(s.logger).Log("msg", "no local data found after reload, will force reading from lookback period")
+	// Set eagerly so the flag is already in place when the lifecycler's stopping()
+	// checks it. Setting it in our own stopping() races with context-cancellation
+	// that triggers the lifecycler's shutdown first.
+	if s.cfg.RemoveOwnerOnShutdown {
+		s.ingestPartitionLifecycler.SetRemoveOwnerOnShutdown(true)
 	}
 
 	err = services.StartAndAwaitRunning(ctx, s.ingestPartitionLifecycler)
@@ -308,7 +325,76 @@ func (s *LiveStore) starting(ctx context.Context) error {
 		return fmt.Errorf("failed to start livestore lifecycler: %w", err)
 	}
 
-	s.client, err = ingest.NewReaderClient(
+	if err := s.startIngestPath(ctx); err != nil {
+		return err
+	}
+
+	for i := range s.cfg.CompleteBlockConcurrency {
+		idx := i
+		s.runInBackground(func() {
+			s.globalCompleteLoop(idx)
+		})
+	}
+
+	// allow background processes to start
+	level.Info(s.logger).Log("msg", "starting all background processes")
+	s.startAllBackgroundProcesses()
+
+	level.Info(s.logger).Log("msg", "waiting for ingestion catching up")
+	if err := s.waitForIngestPathReady(ctx); err != nil {
+		return err
+	}
+	level.Info(s.logger).Log("msg", "done waiting for ingestion catching up")
+
+	// Mark as ready at end of starting()
+	s.readyErr.Store(nil)
+	metricReady.Set(1)
+	level.Info(s.logger).Log("msg", "live-store ready to serve queries")
+
+	return nil
+}
+
+func (s *LiveStore) waitForIngestPathReady(ctx context.Context) error {
+	if !s.cfg.ConsumeFromKafka {
+		return nil
+	}
+	// Wait for catch-up before marking ready (if enabled)
+	if err := s.waitForCatchUp(ctx); err != nil {
+		return fmt.Errorf("failed to catch up: %w", err)
+	}
+	return nil
+}
+
+func (s *LiveStore) startIngestPath(ctx context.Context) error {
+	if !s.cfg.ConsumeFromKafka {
+		return nil
+	}
+	return s.startKafkaIngestPath(ctx)
+}
+
+// shouldForceFromLookback decides whether to re-read the Kafka lookback to rebuild query state.
+// Skipped when local data exists, or when the partition is Inactive (prior pod already drained).
+func (s *LiveStore) shouldForceFromLookback(ctx context.Context) bool {
+	if len(s.getInstances()) > 0 {
+		return false
+	}
+	state, _, err := s.ingestPartitionLifecycler.GetPartitionState(ctx)
+	if err != nil {
+		level.Warn(s.logger).Log("msg", "failed to read partition state, defaulting to lookback replay", "err", err)
+		return true
+	}
+	if state == ring.PartitionInactive {
+		level.Info(s.logger).Log("msg", "skipping lookback replay because partition is Inactive")
+		return false
+	}
+	level.Info(s.logger).Log("msg", "no local data found after reload, will force reading from lookback period")
+	return true
+}
+
+func (s *LiveStore) startKafkaIngestPath(ctx context.Context) error {
+	forceFromLookback := s.shouldForceFromLookback(ctx)
+
+	client, err := ingest.NewReaderClient(
 		s.cfg.IngestConfig.Kafka,
 		ingest.NewReaderClientMetrics(liveStoreServiceName, s.reg),
 		s.logger,
@@ -316,19 +402,20 @@ func (s *LiveStore) starting(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to create kafka reader client: %w", err)
 	}
+	s.client = client
 
-	err = ingest.WaitForKafkaBroker(ctx, s.client, s.logger)
-	if err != nil {
+	if err := ingest.WaitForKafkaBroker(ctx, s.client, s.logger); err != nil {
 		return fmt.Errorf("failed to start livestore: %w", err)
 	}
 
 	lookbackPeriod := 2 * s.cfg.CompleteBlockTimeout
-	s.reader, err = NewPartitionReaderForPusher(s.client, s.ingestPartitionID, s.cfg.IngestConfig.Kafka, s.cfg.CommitInterval, lookbackPeriod, forceFromLookback, s.consume, s.logger, s.reg)
+	reader, err := NewPartitionReaderForPusher(s.client, s.ingestPartitionID, s.cfg.IngestConfig.Kafka, s.cfg.CommitInterval, lookbackPeriod, forceFromLookback, s.consume, s.logger, s.reg)
 	if err != nil {
 		return fmt.Errorf("failed to create partition reader: %w", err)
 	}
-	err = services.StartAndAwaitRunning(ctx, s.reader)
-	if err != nil {
+	s.reader = reader
+
+	if err := services.StartAndAwaitRunning(ctx, s.reader); err != nil {
 		return fmt.Errorf("failed to start partition reader: %w", err)
 	}
 
@@ -344,26 +431,6 @@ func (s *LiveStore) starting(ctx context.Context) error {
 		s.client.ForceMetadataRefresh,
 	)
 
-	for i := range s.cfg.CompleteBlockConcurrency {
-		idx := i
-		s.runInBackground(func() {
-			s.globalCompleteLoop(idx)
-		})
-	}
-
-	// allow background processes to start
-	s.startAllBackgroundProcesses()
-
-	// Wait for catch-up before marking ready (if enabled)
-	if err := s.waitForCatchUp(ctx); err != nil {
-		return fmt.Errorf("failed to catch up: %w", err)
-	}
-
-	// Mark as ready at end of starting()
-	s.readyErr.Store(nil)
-	metricReady.Set(1)
-	level.Info(s.logger).Log("msg", "live-store ready to serve queries")
-
 	return nil
 }
 
@@ -377,38 +444,58 @@ func (s *LiveStore) running(ctx context.Context) error {
 }
 
 func (s *LiveStore) stopping(error) error {
-	// Remove partition owner from ring on shutdown if configured.
-	// On startup, createPartitionAndRegisterOwner() re-registers the owner immediately.
-	if s.cfg.RemoveOwnerOnShutdown {
-		level.Info(s.logger).Log("msg", "Unregistering partition owner")
-		s.ingestPartitionLifecycler.SetRemoveOwnerOnShutdown(true)
-	}
+	level.Info(s.logger).Log("msg", "live store stopping", "remove_partition_owner", s.ingestPartitionLifecycler.RemoveOwnerOnShutdown())
 
-	// Stop the kafka lag background worker.
-	s.lagCancel()
+	// Reject new queries early in shutdown, before tearing down the reader.
+	s.readyErr.Store(&ErrStopping)
 	metricReady.Set(0)
 
-	// Stop consuming
-	err := services.StopAndAwaitTerminated(context.Background(), s.reader)
-	if err != nil {
-		level.Warn(s.logger).Log("msg", "failed to stop reader", "err", err)
-		return err
+	var stopErr error
+
+	if s.cfg.ConsumeFromKafka {
+		// Stop the kafka lag background worker.
+		if s.lagCancel != nil {
+			s.lagCancel()
+		}
+		// Stop consuming.
+		if err := services.StopAndAwaitTerminated(context.Background(), s.reader); err != nil {
+			level.Warn(s.logger).Log("msg", "failed to stop reader", "err", err)
+			stopErr = errors.Join(stopErr, err)
+		}
+
+		// Reset lag metrics for our partition when stopping.
+		ingest.ResetLagMetricsForRevokedPartitions(s.cfg.IngestConfig.Kafka.ConsumerGroup, []int32{s.ingestPartitionID})
 	}
 
-	// Reset lag metrics for our partition when stopping
-	ingest.ResetLagMetricsForRevokedPartitions(s.cfg.IngestConfig.Kafka.ConsumerGroup, []int32{s.ingestPartitionID})
+	// Stop both the membership ring and partition ring even if an earlier shutdown step failed.
+	if err := services.StopAndAwaitTerminated(context.Background(), s.livestoreLifecycler); err != nil {
+		level.Warn(s.logger).Log("msg", "failed to stop livestore lifecycler", "err", err)
+		stopErr = errors.Join(stopErr, err)
+	}
 
-	// Flush all data to disk
+	if err := services.StopAndAwaitTerminated(context.Background(), s.ingestPartitionLifecycler); err != nil {
+		level.Warn(s.logger).Log("msg", "failed to stop partition lifecycler", "err", err)
+		stopErr = errors.Join(stopErr, err)
+	}
+
+	level.Info(s.logger).Log("msg", "stopping periodic WAL flush goroutines")
+	s.stopAllCutToWalLoops()
+	level.Info(s.logger).Log("msg", "periodic WAL flush goroutines stopped")
+
+	// Flush all data to disk.
+	level.Info(s.logger).Log("msg", "cutting all instances to WAL")
 	s.cutAllInstancesToWal()
+	level.Info(s.logger).Log("msg", "done cutting all instances to WAL")
 
-	// Remove the shutdown marker if it exists since we are shutting down
+	// Remove the shutdown marker if it exists since we are shutting down.
 	shutdownMarkerPath := shutdownmarker.GetPath(s.cfg.ShutdownMarkerDir)
 	if err := shutdownmarker.Remove(shutdownMarkerPath); err != nil {
 		level.Warn(s.logger).Log("msg", "failed to remove shutdown marker", "path", shutdownMarkerPath, "err", err)
+		stopErr = errors.Join(stopErr, err)
 	}
 
 	if s.cfg.holdAllBackgroundProcesses { // nothing to do
-		return nil
+		return stopErr
 	}
 
 	ticker := time.NewTicker(100 * time.Millisecond)
@@ -417,9 +504,10 @@ func (s *LiveStore) stopping(error) error {
 	timeout := time.NewTimer(s.cfg.InstanceCleanupPeriod)
 	defer timeout.Stop()
 
+	level.Info(s.logger).Log("msg", "stopping all background processes")
 	s.stopAllBackgroundProcesses()
 
-	return nil
+	return stopErr
 }
 
 func (s *LiveStore) waitForCatchUp(ctx context.Context) error {
@@ -496,6 +584,13 @@ func (s *LiveStore) waitForCatchUp(ctx context.Context) error {
 // It takes lagShortcutThreshold to shortcut calculations if the lag is close to the end of the partition.
 // To disable the shortcut, set lagShortcutThreshold to a negative value.
 func (s *LiveStore) calculateTimeLag(lagShortcutThreshold int64) *time.Duration {
+	// reader is nil only before starting() creates it. After stopping(), reader
+	// is a stopped service but not nil, and its atomic fields remain safe to read.
+	if s.reader == nil {
+		level.Debug(s.logger).Log("msg", "Partition reader not initialized")
+		return nil
+	}
+
 	// Use cached high watermark from fetch responses (avoids extra API call)
 	lag := s.reader.lag.Load()
 	zero := time.Duration(0)
@@ -531,7 +626,7 @@ func (s *LiveStore) calculateTimeLag(lagShortcutThreshold int64) *time.Duration 
 
 func (s *LiveStore) consume(ctx context.Context, rs recordIter, now time.Time) (*kadm.Offset, error) {
 	defer s.decoder.Reset()
-	_, span := tracer.Start(ctx, "LiveStore.consume")
+	ctx, span := tracer.Start(ctx, "LiveStore.consume")
 	defer span.End()
 
 	recordCount := 0
@@ -542,6 +637,10 @@ func (s *LiveStore) consume(ctx context.Context, rs recordIter, now time.Time) (
 	for !rs.Done() {
 		record := rs.Next()
 		tenant := string(record.Key)
+
+		// Track partition lag in seconds
+		lag := now.Sub(record.Timestamp)
+		ingest.SetPartitionLagSeconds(s.cfg.IngestConfig.Kafka.ConsumerGroup, record.Partition, lag)
 
 		if record.Timestamp.Before(cutoff) {
 			metricRecordsDropped.WithLabelValues(tenant, droppedRecordReasonTooOld).Inc()
@@ -571,10 +670,6 @@ func (s *LiveStore) consume(ctx context.Context, rs recordIter, now time.Time) (
 
 		// Push data to tenant instance
 		inst.pushBytes(ctx, record.Timestamp, pushReq)
-
-		// Track partition lag in seconds
-		lag := now.Sub(record.Timestamp)
-		ingest.SetPartitionLagSeconds(s.cfg.IngestConfig.Kafka.ConsumerGroup, record.Partition, lag)
 
 		metricRecordsProcessed.WithLabelValues(tenant).Inc()
 		recordCount++
@@ -619,16 +714,14 @@ func (s *LiveStore) getOrCreateInstance(tenantID string) (*instance, error) {
 	}
 
 	// Create new instance
-	inst, err := newInstance(tenantID, s.cfg, s.wal, s.completeBlockEncoding, s.overrides, s.logger)
+	inst, err := newInstance(tenantID, s.cfg, s.wal, s.completeBlockEncoding, s.completeBlockLifecycle, s.overrides, s.logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create instance for tenant %s: %w", tenantID, err)
 	}
 
 	s.instances[tenantID] = inst
 
-	s.runInBackground(func() {
-		s.perTenantCutToWalLoop(inst)
-	})
+	s.startPerTenantCutToWalLoop(inst)
 	s.runInBackground(func() {
 		s.perTenantCleanupLoop(inst)
 	})
@@ -650,29 +743,43 @@ func (s *LiveStore) cutAllInstancesToWal() {
 	instances := s.getInstances()
 
 	for _, instance := range instances {
-		s.cutOneInstanceToWal(instance, true)
+		s.cutOneInstanceToWal(s.ctx, instance, true)
 	}
 }
 
-func (s *LiveStore) cutOneInstanceToWal(inst *instance, immediate bool) {
-	// Regular trace cuts (live traces -> head block)
-	err := inst.cutIdleTraces(immediate)
-	if err != nil {
-		level.Error(s.logger).Log("msg", "failed to cut idle traces", "tenant", inst.tenantID, "err", err)
-	}
+func (s *LiveStore) cutOneInstanceToWal(ctx context.Context, inst *instance, immediate bool) {
+	ctx, span := tracer.Start(ctx, "LiveStore.cutOneInstanceToWal",
+		oteltrace.WithAttributes(
+			attribute.String("tenant", inst.tenantID),
+			attribute.Bool("immediate", immediate),
+		))
+	defer span.End()
 
-	// Regular block cuts
-	blockID, err := inst.cutBlocks(immediate)
-	if err != nil {
-		level.Error(s.logger).Log("msg", "failed to cut blocks", "tenant", inst.tenantID, "err", err)
-	}
-
-	// If head block is cut, enqueue complete operation
-	if blockID != uuid.Nil {
-		err = s.enqueueCompleteOp(inst.tenantID, blockID, false)
+	var liveTracesDrained bool
+	var err error
+	for !liveTracesDrained {
+		// Regular trace cuts (live traces -> head block)
+		liveTracesDrained, err = inst.cutIdleTraces(ctx, immediate)
 		if err != nil {
-			level.Error(s.logger).Log("msg", "failed to enqueue complete operation", "tenant", inst.tenantID, "err", err)
-			return
+			level.Error(s.logger).Log("msg", "failed to cut idle traces", "tenant", inst.tenantID, "err", err)
+			span.SetStatus(codes.Error, err.Error())
+			span.RecordError(err)
+			break
+		}
+		id, err := inst.cutBlocks(ctx, immediate)
+		if err != nil {
+			level.Error(s.logger).Log("msg", "failed to cut blocks", "tenant", inst.tenantID, "err", err)
+			span.SetStatus(codes.Error, err.Error())
+			span.RecordError(err)
+			break
+		}
+		if id != uuid.Nil {
+			span.AddEvent("block enqueued for completion",
+				oteltrace.WithAttributes(attribute.String("blockID", id.String())))
+			if err := s.enqueueCompleteOp(inst.tenantID, id, false); err != nil {
+				level.Error(s.logger).Log("msg", "failed to enqueue complete operation", "tenant", inst.tenantID, "err", err)
+				span.RecordError(err)
+			}
 		}
 	}
 }
@@ -702,6 +809,35 @@ func (s *LiveStore) OnRingInstanceStopping(*ring.BasicLifecycler) {
 func (s *LiveStore) OnRingInstanceHeartbeat(*ring.BasicLifecycler, *ring.Desc, *ring.InstanceDesc) {
 }
 
+// PushBytes ingests pre-marshaled traces directly into the local live-store.
+func (s *LiveStore) PushBytes(ctx context.Context, req *tempopb.PushBytesRequest) (*tempopb.PushResponse, error) {
+	if err := s.CheckReady(ctx); err != nil {
+		return nil, err
+	}
+	if req == nil {
+		return nil, errors.New("nil push bytes request")
+	}
+	if len(req.Traces) != len(req.Ids) {
+		return nil, fmt.Errorf("mismatched traces and ids length: traces=%d ids=%d", len(req.Traces), len(req.Ids))
+	}
+	if len(req.Traces) == 0 {
+		return &tempopb.PushResponse{}, nil
+	}
+
+	tenantID, err := validation.ExtractValidTenantID(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	inst, err := s.getOrCreateInstance(tenantID)
+	if err != nil {
+		return nil, err
+	}
+
+	inst.pushBytes(ctx, time.Now(), req)
+	return &tempopb.PushResponse{}, nil
+}
+
 // FindTraceByID implements tempopb.Querier
 func (s *LiveStore) FindTraceByID(ctx context.Context, req *tempopb.TraceByIDRequest) (*tempopb.TraceByIDResponse, error) {
 	return withInstance(ctx, s, func(inst *instance) (*tempopb.TraceByIDResponse, error) {
@@ -711,10 +847,13 @@ func (s *LiveStore) FindTraceByID(ctx context.Context, req *tempopb.TraceByIDReq
 
 // SearchRecent implements tempopb.Querier
 func (s *LiveStore) SearchRecent(ctx context.Context, req *tempopb.SearchRequest) (*tempopb.SearchResponse, error) {
-	if s.isLagged(int64(req.End) * 1e9) { // convert seconds to nanoseconds
-		return nil, errLagged
-	}
 	return withInstance(ctx, s, func(inst *instance) (*tempopb.SearchResponse, error) {
+		if s.isLagged(int64(req.End) * 1e9) { // convert seconds to nanoseconds
+			metricLaggedRequests.WithLabelValues("/tempopb.Querier/SearchRecent").Inc()
+			if s.cfg.FailOnHighLag {
+				return nil, errLagged
+			}
+		}
 		return inst.Search(ctx, req)
 	})
 }
@@ -752,24 +891,15 @@ func (s *LiveStore) SearchTagValuesV2(ctx context.Context, req *tempopb.SearchTa
 	})
 }
 
-// PushSpans implements tempopb.MetricsGeneratorServer
-func (s *LiveStore) PushSpans(_ context.Context, _ *tempopb.PushSpansRequest) (*tempopb.PushResponse, error) {
-	return nil, fmt.Errorf("PushSpans not implemented in livestore")
-}
-
-// GetMetrics implements tempopb.MetricsGeneratorServer
-func (s *LiveStore) GetMetrics(_ context.Context, _ *tempopb.SpanMetricsRequest) (*tempopb.SpanMetricsResponse, error) {
-	// Keep this stub until r241 is fully rolled out. After that, we can remove
-	// GetMetrics here by switching LiveStore from MetricsGenerator to MetricsService.
-	return nil, fmt.Errorf("GetMetrics not implemented in livestore")
-}
-
-// QueryRange implements tempopb.MetricsGeneratorServer
+// QueryRange implements tempopb.MetricsServer
 func (s *LiveStore) QueryRange(ctx context.Context, req *tempopb.QueryRangeRequest) (*tempopb.QueryRangeResponse, error) {
-	if s.isLagged(int64(req.End)) { // end param is already nanos, no need to convert
-		return nil, errLagged
-	}
 	return withInstance(ctx, s, func(inst *instance) (*tempopb.QueryRangeResponse, error) {
+		if s.isLagged(int64(req.End)) { // end param is already nanos, no need to convert
+			metricLaggedRequests.WithLabelValues("/tempopb.Metrics/QueryRange").Inc()
+			if s.cfg.FailOnHighLag {
+				return nil, errLagged
+			}
+		}
 		return inst.QueryRange(ctx, req)
 	})
 }
@@ -777,7 +907,7 @@ func (s *LiveStore) QueryRange(ctx context.Context, req *tempopb.QueryRangeReque
 var errLagged = errors.New("cannot guarantee complete results")
 
 func (s *LiveStore) isLagged(endNanos int64) bool {
-	if !s.cfg.FailOnHighLag { // if config disabled, never lagged
+	if !s.cfg.ConsumeFromKafka { // if config disabled or no kafka consumption, never lagged
 		return false
 	}
 	lag := s.calculateTimeLag(0)

@@ -167,6 +167,14 @@ func (c *genericCombiner[T]) HTTPFinal() (*http.Response, error) {
 
 	final, err := c.finalize(c.current)
 	if err != nil {
+		if errors.Is(err, ErrTraceHidden) {
+			c.httpStatusCode = http.StatusNotFound
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Body:       http.NoBody,
+				Header:     http.Header{},
+			}, nil
+		}
 		return nil, err
 	}
 
@@ -197,6 +205,9 @@ func (c *genericCombiner[T]) GRPCFinal() (T, error) {
 
 	final, err := c.finalize(c.current)
 	if err != nil {
+		if errors.Is(err, ErrTraceHidden) {
+			return empty, status.Error(codes.NotFound, ErrTraceHidden.Error())
+		}
 		return empty, err
 	}
 
@@ -331,8 +342,14 @@ func (c *genericCombiner[T]) internalMarshalAs(final T) ([]byte, string, error) 
 	return bodyBytes, contentType, err
 }
 
+// ErrTraceHidden is returned by TraceRedactor.RedactTraceAttributes when a trace is hidden
+// by access policy
+var ErrTraceHidden = errors.New("trace hidden by access policy")
+
+// TraceRedactor is applied to a fully assembled trace before it is returned to
+// the caller. When ErrTraceHidden is returned, the caller should receive a 404 response.
 type TraceRedactor interface {
-	RedactTraceAttributes(t *tempopb.Trace)
+	RedactTraceAttributes(t *tempopb.Trace) error
 }
 
 // unsafeStringToBytes converts a string to []byte without allocation.

@@ -40,6 +40,7 @@ type Interface interface {
 	Forwarders(userID string) []string
 	MaxBytesPerTagValuesQuery(userID string) int
 	MaxBlocksPerTagValuesQuery(userID string) int
+	MaxConditionGroupsPerTagQuery() int
 	IngestionRateLimitBytes(userID string) float64
 	IngestionBurstSizeBytes(userID string) int
 	IngestionTenantShardSize(userID string) int
@@ -64,12 +65,6 @@ type Interface interface {
 	MetricsGeneratorProcessorSpanMetricsDimensions(userID string) []string
 	MetricsGeneratorProcessorSpanMetricsIntrinsicDimensions(userID string) map[string]bool
 	MetricsGeneratorProcessorSpanMetricsFilterPolicies(userID string) []config.FilterPolicy
-	MetricsGeneratorProcessorLocalBlocksMaxLiveTraces(userID string) uint64
-	MetricsGeneratorProcessorLocalBlocksMaxBlockDuration(userID string) time.Duration
-	MetricsGeneratorProcessorLocalBlocksMaxBlockBytes(userID string) uint64
-	MetricsGeneratorProcessorLocalBlocksTraceIdlePeriod(userID string) time.Duration
-	MetricsGeneratorProcessorLocalBlocksFlushCheckPeriod(userID string) time.Duration
-	MetricsGeneratorProcessorLocalBlocksCompleteBlockTimeout(userID string) time.Duration
 	MetricsGeneratorProcessorSpanMetricsDimensionMappings(userID string) []sharedconfig.DimensionMappings
 	MetricsGeneratorProcessorSpanMetricsEnableTargetInfo(userID string) (bool, bool) // returns (enabled, isSet)
 	MetricsGeneratorProcessorServiceGraphsEnableClientServerPrefix(userID string) bool
@@ -80,7 +75,9 @@ type Interface interface {
 	MetricsGeneratorProcessorHostInfoHostIdentifiers(userID string) []string
 	MetricsGeneratorProcessorHostInfoMetricName(userID string) string
 	MetricsGeneratorProcessorServiceGraphsSpanMultiplierKey(userID string) string
+	MetricsGeneratorProcessorServiceGraphsEnableTraceStateSpanMultiplier(userID string) (bool, bool)
 	MetricsGeneratorProcessorSpanMetricsSpanMultiplierKey(userID string) string
+	MetricsGeneratorProcessorSpanMetricsEnableTraceStateSpanMultiplier(userID string) (bool, bool)
 	MetricsGeneratorNativeHistogramBucketFactor(userID string) float64
 	MetricsGeneratorNativeHistogramMaxBucketNumber(userID string) uint32
 	MetricsGeneratorNativeHistogramMinResetDuration(userID string) time.Duration
@@ -93,6 +90,7 @@ type Interface interface {
 	DedicatedColumns(userID string) backend.DedicatedColumns
 	UnsafeQueryHints(userID string) bool
 	LeftPadTraceIDs(userID string) bool
+	MetricsSpanOnlyFetch(userID string) *bool
 	CostAttributionMaxCardinality(userID string) uint64
 	CostAttributionDimensions(userID string) map[string]string
 

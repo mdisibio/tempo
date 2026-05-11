@@ -65,12 +65,10 @@ func (q *Querier) queryBlock(ctx context.Context, req *tempopb.QueryRangeRequest
 	}
 
 	meta := &backend.BlockMeta{
-		Version:   req.Version,
-		TenantID:  tenantID,
-		StartTime: time.Unix(0, int64(req.Start)),
-		EndTime:   time.Unix(0, int64(req.End)),
-		// IndexPageSize:    req.IndexPageSize,
-		// TotalRecords:     req.TotalRecords,
+		Version:          req.Version,
+		TenantID:         tenantID,
+		StartTime:        time.Unix(0, int64(req.Start)),
+		EndTime:          time.Unix(0, int64(req.End)),
 		BlockID:          blockID,
 		Size_:            req.Size_,
 		FooterSize:       req.FooterSize,
@@ -81,26 +79,48 @@ func (q *Querier) queryBlock(ctx context.Context, req *tempopb.QueryRangeRequest
 	opts.StartPage = int(req.StartPage)
 	opts.TotalPages = int(req.PagesToSearch)
 
+	// Parse without optimizations to read hints; optimizations are applied by CompileMetricsQueryRange.
+	expr, err := traceql.ParseNoOptimizations(req.Query)
+	if err != nil {
+		return nil, err
+	}
+
+	var compileOpts []traceql.CompileOption
+
 	unsafe := q.limits.UnsafeQueryHints(tenantID)
-
-	expr, err := traceql.Parse(req.Query)
-	if err != nil {
-		return nil, err
+	if unsafe {
+		compileOpts = append(compileOpts, traceql.WithUnsafeHints(true))
+	}
+	for _, name := range req.SkipASTTransformations {
+		compileOpts = append(compileOpts, traceql.WithSkipOptimization(name))
 	}
 
-	timeOverlapCutoff := q.cfg.Metrics.TimeOverlapCutoff
 	if v, ok := expr.Hints.GetFloat(traceql.HintTimeOverlapCutoff, unsafe); ok && v >= 0 && v <= 1.0 {
-		timeOverlapCutoff = v
+		// Use valid hint from query.
+		compileOpts = append(compileOpts, traceql.WithTimeOverlapCutoff(v))
+	} else {
+		// Use default.
+		compileOpts = append(compileOpts, traceql.WithTimeOverlapCutoff(q.cfg.Metrics.TimeOverlapCutoff))
 	}
 
-	eval, err := traceql.NewEngine().CompileMetricsQueryRange(req, timeOverlapCutoff, unsafe)
+	if p := q.limits.MetricsSpanOnlyFetch(tenantID); p != nil {
+		compileOpts = append(compileOpts, traceql.WithSpanOnlyFetch(*p))
+	}
+
+	eval, err := traceql.NewEngine().CompileMetricsQueryRange(req, compileOpts...)
 	if err != nil {
 		return nil, err
 	}
 
-	f := traceql.NewSpansetFetcherWrapper(func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansResponse, error) {
-		return q.store.Fetch(ctx, meta, req, opts)
-	})
+	f := traceql.NewSpansetFetcherWrapperBoth(
+		func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansResponse, error) {
+			return q.store.Fetch(ctx, meta, req, opts)
+		},
+		func(ctx context.Context, req traceql.FetchSpansRequest) (traceql.FetchSpansOnlyResponse, error) {
+			return q.store.FetchSpans(ctx, meta, req, opts)
+		},
+	)
+
 	err = eval.Do(ctx, f, uint64(meta.StartTime.UnixNano()), uint64(meta.EndTime.UnixNano()), int(req.MaxSeries))
 	if err != nil {
 		return nil, err

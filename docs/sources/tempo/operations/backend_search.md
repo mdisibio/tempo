@@ -20,9 +20,9 @@ The general advice is to scale your workers and queriers. Additional queriers ca
 while additional workers more aggressively reduce the length of your blocklist and copies of data (if using `RF=3`).
 
 {{< admonition type="note" >}}
-All forms of search (TraceQL and tags based) are only supported on the `vParquet` and forward blocks. The v2 block format has been removed in Tempo 3.0.
+All forms of search (TraceQL and tags based) require `vParquet` block formats. The v2 block format has been removed in Tempo 3.0.
 
-Tempo 2.3 and higher support [Dedicated attribute columns](../dedicated_columns/), another great method to improve search performance.
+[Dedicated attribute columns](../dedicated_columns/) are another effective method to improve search performance.
 {{< /admonition>}}
 
 ## Before you begin
@@ -50,13 +50,13 @@ querier
 
 ## Tempo query path
 
-Tempo has a query path made up of a query-frontend, querrier, ingester, metrics-generator, and backend.
+Tempo has a query path made up of a query-frontend, querier, live-store, and backend.
 
 You can think about each component in a query path as a generic producer and worker model:
 
 * The query-frontend is a producer and it has multiple workers connected to it. The query-frontend takes a single query and shards it into multiple jobs (units of work).
 * The queriers are workers. They enqueue work from a queue, process it, and send the results back to the producer (query-frontend).
-* The querier either reads data from backend and processes the query, or it delegates the query to ingesters and metrics generators based on the type of job, time range, and query type.
+* The querier either reads data from backend and processes the query, or it delegates the query to live-stores based on the type of job, time range, and query type.
 
 ![Tempo query path architecture](/media/docs/tempo/tempo-query-frontend.svg)
 

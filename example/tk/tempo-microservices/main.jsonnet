@@ -18,13 +18,7 @@ minio + metrics + load + kafka + tempo {
     cluster: 'k3d',
     namespace: 'default',
     block_builder_concurrent_rollout_enabled: true,
-    compactor+: {},
     querier+: {},
-    ingester+: {
-      replicas: 0,
-      pvc_size: '1Gi',
-      pvc_storage_class: 'local-path',
-    },
     live_store+: {
       replicas: 2,
       pvc_size: '1Gi',
@@ -66,6 +60,8 @@ minio + metrics + load + kafka + tempo {
     },
     backend: 's3',
     bucket: 'tempo',
+    kafka_address: 'kafka:9092',
+    kafka_topic: 'tempo-ingest',
     tempo_query_url: 'http://query-frontend:3200',
   },
 
@@ -80,21 +76,6 @@ minio + metrics + load + kafka + tempo {
           insecure: true,
         },
       },
-    },
-    partition_ring_live_store: true,
-    distributor+: {
-      ingester_write_path_enabled: false,
-      kafka_write_path_enabled: true,
-    },
-    ingest+: {
-      enabled: true,
-      kafka+: {
-        address: 'kafka:9092',
-        topic: 'tempo-ingest',
-      },
-    },
-    querier+: {
-      query_live_store: true,
     },
     block_builder+: {
       consume_cycle_duration: '30s',
@@ -113,9 +94,6 @@ minio + metrics + load + kafka + tempo {
 
   local container = k.core.v1.container,
   local containerPort = k.core.v1.containerPort,
-  tempo_compactor_container+::
-    k.util.resourcesRequests('500m', '500Mi'),
-
   tempo_distributor_container+::
     k.util.resourcesRequests('500m', '500Mi') +
     container.withPortsMixin([

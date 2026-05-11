@@ -1,15 +1,16 @@
 package usagestats
 
 import (
+	"encoding/json"
 	"runtime"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/grafana/tempo/cmd/tempo/build"
 
 	"github.com/google/uuid"
-	jsoniter "github.com/json-iterator/go"
 	"github.com/stretchr/testify/require"
 )
 
@@ -61,7 +62,7 @@ func Test_BuildReport(t *testing.T) {
 	require.Equal(t, r.Metrics["query_throughput"].(map[string]interface{})["avg"], float64(25+300+5)/3)
 	require.Equal(t, r.Metrics["active_tenants"], int64(3))
 
-	out, _ := jsoniter.MarshalIndent(r, "", " ")
+	out, _ := json.MarshalIndent(r, "", " ")
 	t.Log(string(out))
 }
 
@@ -112,23 +113,25 @@ func Test_BuildStats(t *testing.T) {
 	require.Equal(t, r.CreatedAt, time.Time{})
 	require.Equal(t, r.Interval, time.Time{})
 
-	out, _ := jsoniter.MarshalIndent(r, "", " ")
+	out, _ := json.MarshalIndent(r, "", " ")
 	t.Log(string(out))
 }
 
 func TestCounter(t *testing.T) {
-	c := NewCounter("test_counter")
-	c.Inc(100)
-	c.Inc(200)
-	c.Inc(300)
-	time.Sleep(1 * time.Second)
-	c.updateRate()
-	v := c.Value()
-	require.Equal(t, int64(600), v["total"])
-	require.GreaterOrEqual(t, v["rate"], float64(590))
-	c.reset()
-	require.Equal(t, int64(0), c.Value()["total"])
-	require.Equal(t, float64(0), c.Value()["rate"])
+	synctest.Test(t, func(t *testing.T) {
+		c := NewCounter("test_counter")
+		c.Inc(100)
+		c.Inc(200)
+		c.Inc(300)
+		time.Sleep(1 * time.Second)
+		c.updateRate()
+		v := c.Value()
+		require.Equal(t, int64(600), v["total"])
+		require.GreaterOrEqual(t, v["rate"], float64(590))
+		c.reset()
+		require.Equal(t, int64(0), c.Value()["total"])
+		require.Equal(t, float64(0), c.Value()["rate"])
+	})
 }
 
 func TestStatistic(t *testing.T) {

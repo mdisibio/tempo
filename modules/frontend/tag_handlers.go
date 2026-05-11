@@ -24,6 +24,7 @@ import (
 	"github.com/grafana/tempo/pkg/search"
 	"github.com/grafana/tempo/pkg/tempopb"
 	"github.com/grafana/tempo/pkg/traceql"
+	"github.com/grafana/tempo/pkg/util/tracing"
 	"google.golang.org/grpc/codes"
 )
 
@@ -85,7 +86,7 @@ func newTagsStreamingGRPCHandler(cfg Config, next pipeline.AsyncRoundTripper[com
 			bytesProcessed = finalResponse.Metrics.InspectedBytes
 		}
 		postSLOHook(nil, tenant, bytesProcessed, duration, err)
-		logTagsResult(logger, tenant, "SearchTagsStreaming", req.Scope, req.End-req.Start, duration.Seconds(), bytesProcessed, err)
+		logTagsResult(srv.Context(), logger, tenant, "SearchTagsStreaming", req.Scope, req.End-req.Start, duration.Seconds(), bytesProcessed, err)
 
 		return err
 	}
@@ -108,6 +109,14 @@ func newTagsV2StreamingGRPCHandler(cfg Config, next pipeline.AsyncRoundTripper[c
 		httpReq, tenant, err := buildTagsRequestAndExtractTenant(ctx, req, downstreamPath, logger)
 		if err != nil {
 			return err
+		}
+
+		if req.Query != "" {
+			_, err = traceql.ExtractConditionGroups(req.Query, o.MaxConditionGroupsPerTagQuery())
+			if err != nil {
+				_ = level.Error(logger).Log("msg", "search tags v2: ", "err", err)
+				return status.Error(codes.InvalidArgument, err.Error())
+			}
 		}
 
 		var finalResponse *tempopb.SearchTagsV2Response
@@ -147,7 +156,7 @@ func newTagsV2StreamingGRPCHandler(cfg Config, next pipeline.AsyncRoundTripper[c
 			bytesProcessed = finalResponse.Metrics.InspectedBytes
 		}
 		postSLOHook(nil, tenant, bytesProcessed, duration, err)
-		logTagsResult(logger, tenant, "SearchTagsV2Streaming", req.Scope, req.End-req.Start, duration.Seconds(), bytesProcessed, err)
+		logTagsResult(ctx, logger, tenant, "SearchTagsV2Streaming", req.Scope, req.End-req.Start, duration.Seconds(), bytesProcessed, err)
 
 		return err
 	}
@@ -195,7 +204,7 @@ func newTagValuesStreamingGRPCHandler(cfg Config, next pipeline.AsyncRoundTrippe
 			bytesProcessed = finalResponse.Metrics.InspectedBytes
 		}
 		postSLOHook(nil, tenant, bytesProcessed, duration, err)
-		logTagValuesResult(logger, tenant, "SearchTagValuesStreaming", req.TagName, req.Query, req.End-req.Start, duration.Seconds(), bytesProcessed, err)
+		logTagValuesResult(ctx, logger, tenant, "SearchTagValuesStreaming", req.TagName, req.Query, req.End-req.Start, duration.Seconds(), bytesProcessed, err)
 
 		return err
 	}
@@ -224,6 +233,14 @@ func newTagValuesV2StreamingGRPCHandler(cfg Config, next pipeline.AsyncRoundTrip
 			return err
 		}
 
+		if req.Query != "" {
+			_, err = traceql.ExtractConditionGroups(req.Query, o.MaxConditionGroupsPerTagQuery())
+			if err != nil {
+				_ = level.Error(logger).Log("msg", "search tag values v2: ", "err", err)
+				return status.Error(codes.InvalidArgument, err.Error())
+			}
+		}
+
 		var finalResponse *tempopb.SearchTagValuesV2Response
 		comb := combiner.NewTypedSearchTagValuesV2(o.MaxBytesPerTagValuesQuery(tenant), req.MaxTagValues, req.StaleValueThreshold, api.MarshallingFormatProtobuf)
 		collector := pipeline.NewGRPCCollector(next, cfg.ResponseConsumers, cfg.MaxGRPCStreamingPacketSize, comb, func(res *tempopb.SearchTagValuesV2Response) error {
@@ -241,7 +258,7 @@ func newTagValuesV2StreamingGRPCHandler(cfg Config, next pipeline.AsyncRoundTrip
 			bytesProcessed = finalResponse.Metrics.InspectedBytes
 		}
 		postSLOHook(nil, tenant, bytesProcessed, duration, err)
-		logTagValuesResult(logger, tenant, "SearchTagValuesV2Streaming", req.TagName, req.Query, req.End-req.Start, duration.Seconds(), bytesProcessed, err)
+		logTagValuesResult(ctx, logger, tenant, "SearchTagValuesV2Streaming", req.TagName, req.Query, req.End-req.Start, duration.Seconds(), bytesProcessed, err)
 
 		return err
 	}
@@ -300,7 +317,7 @@ func newTagsHTTPHandler(cfg Config, next pipeline.AsyncRoundTripper[combiner.Pip
 
 		duration := time.Since(start)
 		postSLOHook(resp, tenant, bytesProcessed, duration, err)
-		logTagsResult(logger, tenant, "SearchTags", scope, rangeDur, duration.Seconds(), bytesProcessed, err)
+		logTagsResult(req.Context(), logger, tenant, "SearchTags", scope, rangeDur, duration.Seconds(), bytesProcessed, err)
 
 		return resp, err
 	})
@@ -322,7 +339,14 @@ func newTagsV2HTTPHandler(cfg Config, next pipeline.AsyncRoundTripper[combiner.P
 			}
 		}
 
-		scope, _, rangeDur, maxTagsPerScope, staleValueThreshold := parseParams(req)
+		scope, q, rangeDur, maxTagsPerScope, staleValueThreshold := parseParams(req)
+		if q != "" {
+			_, err := traceql.ExtractConditionGroups(q, o.MaxConditionGroupsPerTagQuery())
+			if err != nil {
+				_ = level.Error(logger).Log("msg", "search tags v2: ", "err", err)
+				return httpInvalidRequest(err), nil
+			}
+		}
 
 		// check marshalling format
 		marshallingFormat := api.MarshalingFormatFromAcceptHeader(req.Header)
@@ -365,7 +389,7 @@ func newTagsV2HTTPHandler(cfg Config, next pipeline.AsyncRoundTripper[combiner.P
 
 		duration := time.Since(start)
 		postSLOHook(resp, tenant, bytesProcessed, duration, err)
-		logTagsResult(logger, tenant, "SearchTagsV2", scope, rangeDur, duration.Seconds(), bytesProcessed, err)
+		logTagsResult(req.Context(), logger, tenant, "SearchTagsV2", scope, rangeDur, duration.Seconds(), bytesProcessed, err)
 
 		return resp, err
 	})
@@ -410,7 +434,7 @@ func newTagValuesHTTPHandler(cfg Config, next pipeline.AsyncRoundTripper[combine
 
 		duration := time.Since(start)
 		postSLOHook(resp, tenant, bytesProcessed, duration, err)
-		logTagValuesResult(logger, tenant, "SearchTagValues", tagName, query, rangeDur, duration.Seconds(), bytesProcessed, err)
+		logTagValuesResult(req.Context(), logger, tenant, "SearchTagValues", tagName, query, rangeDur, duration.Seconds(), bytesProcessed, err)
 
 		return resp, err
 	})
@@ -434,6 +458,13 @@ func newTagValuesV2HTTPHandler(cfg Config, next pipeline.AsyncRoundTripper[combi
 
 		_, query, rangeDur, maxTagsValues, staleValueThreshold := parseParams(req)
 		tagName := extractTagName(req.URL.Path, tagNameRegexV2)
+		if query != "" {
+			_, err := traceql.ExtractConditionGroups(query, o.MaxConditionGroupsPerTagQuery())
+			if err != nil {
+				_ = level.Error(logger).Log("msg", "search tag values v2: ", "err", err)
+				return httpInvalidRequest(err), nil
+			}
+		}
 
 		// check marshalling format
 		marshallingFormat := api.MarshalingFormatFromAcceptHeader(req.Header)
@@ -455,7 +486,7 @@ func newTagValuesV2HTTPHandler(cfg Config, next pipeline.AsyncRoundTripper[combi
 
 		duration := time.Since(start)
 		postSLOHook(resp, tenant, bytesProcessed, duration, err)
-		logTagValuesResult(logger, tenant, "SearchTagValuesV2", tagName, query, rangeDur, duration.Seconds(), bytesProcessed, err)
+		logTagValuesResult(req.Context(), logger, tenant, "SearchTagValuesV2", tagName, query, rangeDur, duration.Seconds(), bytesProcessed, err)
 
 		return resp, err
 	})
@@ -523,10 +554,12 @@ func logTagsRequest(logger log.Logger, tenantID, handler, scope string, rangeSec
 		"range_seconds", rangeSeconds)
 }
 
-func logTagsResult(logger log.Logger, tenantID, handler, scope string, rangeSeconds uint32, durationSeconds float64, inspectedBytes uint64, err error) {
+func logTagsResult(ctx context.Context, logger log.Logger, tenantID, handler, scope string, rangeSeconds uint32, durationSeconds float64, inspectedBytes uint64, err error) {
+	traceID, _ := tracing.ExtractTraceID(ctx)
 	level.Info(logger).Log(
 		"msg", "search tag response",
 		"tenant", tenantID,
+		"traceID", traceID,
 		"handler", handler,
 		"scope", scope,
 		"range_seconds", rangeSeconds,
@@ -546,10 +579,12 @@ func logTagValuesRequest(logger log.Logger, tenantID, handler, tagName, query st
 		"range_seconds", rangeSeconds)
 }
 
-func logTagValuesResult(logger log.Logger, tenantID, handler, tagName, query string, rangeSeconds uint32, durationSeconds float64, inspectedBytes uint64, err error) {
+func logTagValuesResult(ctx context.Context, logger log.Logger, tenantID, handler, tagName, query string, rangeSeconds uint32, durationSeconds float64, inspectedBytes uint64, err error) {
+	traceID, _ := tracing.ExtractTraceID(ctx)
 	level.Info(logger).Log(
 		"msg", "search tag values response",
 		"tenant", tenantID,
+		"traceID", traceID,
 		"handler", handler,
 		"tag", tagName,
 		"query", query,

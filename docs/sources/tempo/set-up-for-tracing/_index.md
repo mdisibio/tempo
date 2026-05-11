@@ -43,6 +43,7 @@ To set up for tracing, you need to:
    Check out the [examples](ref:examples) for ideas on how to get started.
 1. Deploy Tempo using the [Set up Tempo documentation](ref:setup).
    Tempo offers different deployment modes. Refer to the [Deployment documentation](ref:deploy) section for more information.
+   You can download the latest version from the [Tempo Releases page](https://github.com/grafana/tempo/releases).
 1. Instrument your application or service to emit traces. Use the [Set up instrumentation](./instrument-send/set-up-instrumentation/) documentation.
 1. Set up a collector, like Grafana Alloy or the OpenTelemetry Collector, to offload traces from your application and forward them to Tempo. Refer to the [Set up a collector](./instrument-send/set-up-collector/) documentation.
 
@@ -84,8 +85,8 @@ To learn more about instrumentation, refer to the [Set up instrumentation](./ins
 After you instrument your application for tracing, the traces are sent
 to a backend for storage and visualization. You can build a tracing pipeline that
 offloads spans from your application, buffers them, and forwards them to a backend.
-Tracing pipelines are optional since most clients can send directly to Tempo.
-The pipelines become more critical the larger and more robust your tracing system is.
+While applications can send traces directly to Tempo, using a pipeline (like Grafana Alloy or the OpenTelemetry Collector) is strongly recommended for production deployments.
+Pipelines provide important benefits such as batching, retry logic, and decoupling your application from backend availability.
 
 Grafana Alloy is a service that's deployed close to the application, either on the same node or
 within the same cluster (in Kubernetes) to quickly offload traces from the application and forward them to
@@ -109,4 +110,4 @@ Grafana Tempo is the distributed tracing backend used to store and query traces.
 ## Visualize tracing data with Grafana
 
 Grafana and Grafana Cloud have a built-in Tempo data source that you can use to query Tempo and visualize traces.
-For more information, refer to the [Tempo data source](https://grafana.com/docs/grafana/<GRAFANA_VERSION>/datasources/tempo/) and the [Tempo in Grafana](https://grafana.com/docs/tempo/<TEMPO_VERSION>/introduction/tempo-in-grafana/) topics.
+For more information, refer to the [Tempo data source](https://grafana.com/docs/grafana/<GRAFANA_VERSION>/datasources/tempo/) and the [Visualize tracing data in Grafana](https://grafana.com/docs/tempo/<TEMPO_VERSION>/visualize-traces/) topics.

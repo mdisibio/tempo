@@ -76,13 +76,13 @@ Tanka requires the current context for your Kubernetes environment.
 
 ## Install libraries
 
-Install the `k.libsonnet`, Jsonnet, and Memcachd libraries.
+Install the `k.libsonnet`, Jsonnet, and Memcached libraries.
 
-1. Install `k.libsonnet` for your version of Kubernetes:
+1. Install `k.libsonnet` for your version of Kubernetes. Set `K8S_VERSION` to match your cluster's minor version (for example, `1.32`):
 
    ```bash
    mkdir -p lib
-   export K8S_VERSION=1.25
+   export K8S_VERSION=1.32
    jb install github.com/jsonnet-libs/k8s-libsonnet/${K8S_VERSION}@main
    cat <<EOF > lib/k.libsonnet
    import 'github.com/jsonnet-libs/k8s-libsonnet/${K8S_VERSION}/main.libsonnet'
@@ -167,10 +167,10 @@ Install the `k.libsonnet`, Jsonnet, and Memcachd libraries.
                - --console-address
                - ':9001'
              env:
-               # Minio access key and secret key
-               - name: MINIO_ACCESS_KEY
+               # MinIO root credentials
+               - name: MINIO_ROOT_USER
                  value: 'minio'
-               - name: MINIO_SECRET_KEY
+               - name: MINIO_ROOT_PASSWORD
                  value: 'minio123'
              ports:
                - containerPort: 9000
@@ -226,109 +226,122 @@ Install the `k.libsonnet`, Jsonnet, and Memcachd libraries.
    local containerPort = k.core.v1.containerPort;
 
    tempo {
-       _images+:: {
-           tempo: 'grafana/tempo:latest',
-           tempo_query: 'grafana/tempo-query:latest',
-       },
+    _images+:: {
+          tempo: 'grafana/tempo:latest',
+      },
 
        tempo_distributor_container+:: container.withPorts([
                containerPort.new('jaeger-grpc', 14250),
                containerPort.new('otlp-grpc', 4317),
            ]),
 
-       _config+:: {
-           namespace: 'tempo',
+        _config+:: {
+            namespace: 'tempo',
 
-           compactor+: {
-               replicas: 1,
-           },
-           query_frontend+: {
-               replicas: 2,
-           },
-           querier+: {
-               replicas: 3,
-           },
-           ingester+: {
-               replicas: 3,
-               pvc_size: '10Gi',
-               pvc_storage_class: 'standard',
-           },
-           distributor+: {
-               replicas: 3,
-               receivers: {
-                   jaeger: {
-                       protocols: {
-                           grpc: {
-                               endpoint: '0.0.0.0:14250',
-                           },
-                       },
-                   },
-                   otlp: {
-                       protocols: {
-                           grpc: {
-                               endpoint: '0.0.0.0:4317',
-                           },
-                       },
-                   },
-               },
-           },
+            query_frontend+: {
+                replicas: 2,
+            },
+            querier+: {
+                replicas: 3,
+            },
+            block_builder+: {
+                replicas: 2,
+            },
+            live_store+: {
+                replicas: 2,
+                pvc_size: '10Gi',
+                pvc_storage_class: 'standard',
+            },
+            backend_scheduler+: {
+                pvc_size: '1Gi',
+                pvc_storage_class: 'standard',
+            },
+            backend_worker+: {
+                replicas: 1,
+            },
+            distributor+: {
+                replicas: 3,
+                receivers: {
+                    jaeger: {
+                        protocols: {
+                            grpc: {
+                                endpoint: '0.0.0.0:14250',
+                            },
+                        },
+                    },
+                    otlp: {
+                        protocols: {
+                            grpc: {
+                                endpoint: '0.0.0.0:4317',
+                            },
+                        },
+                    },
+                },
+            },
 
-           metrics_generator+: {
-               replicas: 1,
-               ephemeral_storage_request_size: '10Gi',
-               ephemeral_storage_limit_size: '11Gi',
-               pvc_size: '10Gi',
-               pvc_storage_class: 'standard',
-           },
-           memcached+: {
-               replicas: 3,
-           },
+            metrics_generator+: {
+                replicas: 1,
+                ephemeral_storage_request_size: '10Gi',
+                ephemeral_storage_limit_size: '11Gi',
+                pvc_size: '10Gi',
+                pvc_storage_class: 'standard',
+            },
+            memcached+: {
+                replicas: 3,
+            },
 
-           bucket: 'tempo-data',
-           backend: 's3',
-       },
+            bucket: 'tempo-data',
+            backend: 's3',
+        },
 
-       tempo_config+:: {
-           storage+: {
-               trace+: {
-                   s3: {
-                       bucket: $._config.bucket,
-                       access_key: 'minio',
-                       secret_key: 'minio123',
-                       endpoint: 'minio:9000',
-                       insecure: true,
-                   },
-               },
-           },
-           metrics_generator+: {
-               processor: {
-                   span_metrics: {},
-                   service_graphs: {},
-               },
+        tempo_config+:: {
+            storage+: {
+                trace+: {
+                    s3: {
+                        bucket: $._config.bucket,
+                        access_key: 'minio',
+                        secret_key: 'minio123',
+                        endpoint: 'minio:9000',
+                        insecure: true,
+                    },
+                },
+            },
+            ingest+: {
+                kafka+: {
+                    address: 'kafka:9092',
+                    topic: 'tempo-ingest',
+                },
+            },
+            block_builder+: {
+                consume_cycle_duration: '30s',
+            },
+            metrics_generator+: {
+                processor: {
+                    span_metrics: {},
+                    service_graphs: {},
+                },
 
-               registry+: {
-                   external_labels: {
-                       source: 'tempo',
-                   },
-               },
-           },
-           overrides+: {
-               metrics_generator_processors: ['service-graphs', 'span-metrics'],
-           },
-       },
+                registry+: {
+                    external_labels: {
+                        source: 'tempo',
+                    },
+                },
+            },
+            overrides+: {
+                defaults+: {
+                    metrics_generator+: {
+                        processors: ['service-graphs', 'span-metrics'],
+                    },
+                },
+            },
+        },
+    }
+    EOF
+    ```
 
-       tempo_ingester_container+:: {
-         securityContext+: {
-           runAsUser: 0,
-         },
-       },
-
-       local statefulSet = $.apps.v1.statefulSet,
-       tempo_ingester_statefulset+:
-           statefulSet.mixin.spec.withPodManagementPolicy('Parallel'),
-   }
-   EOF
-   ```
+{{< admonition type="note" >}}
+This configuration requires a Kafka-compatible system. You'll need to deploy Kafka (or a compatible system like Redpanda) before deploying Tempo. Update `ingest.kafka.address` in the configuration to point to your Kafka instance.
+{{< /admonition >}}
 
 ### Optional: Enable metrics-generator
 
@@ -336,7 +349,7 @@ In the preceding configuration, [metrics generation](/docs/tempo/<TEMPO_VERSION>
 If you'd like to remote write these metrics onto a Prometheus compatible instance (such as Grafana Cloud metrics or a Mimir instance), you'll need to include the configuration block below in the `metrics_generator` section of the `tempo_config` block above (this assumes basic auth is required, if not then remove the `basic_auth` section).
 You can find the details for your Grafana Cloud metrics instance for your Grafana Cloud account by using the [Cloud Portal](/docs/grafana-cloud/account-management/cloud-portal/).
 
-````jsonnet
+```jsonnet
 storage+: {
     remote_write: [
         {
@@ -355,16 +368,66 @@ storage+: {
 Enabling metrics generation and remote writing them to Grafana Cloud Metrics produces extra active series that could potentially impact your billing. For more information on billing, refer to [Billing and usage](/docs/grafana-cloud/billing-and-usage/). For more information on metrics generation, refer the [Metrics-generator documentation](/docs/tempo/<TEMPO_VERSION>/metrics-from-traces/metrics-generator/).
 {{< /admonition >}}
 
+### Optional: Enable KEDA autoscaling 
+
+The microservices Jsonnet library includes optional KEDA-based horizontal autoscaling for distributor, metrics-generator, backend-worker, and block-builder components. All KEDA scalers are disabled by default (`enabled: false`), and you enable each component independently under `_config.<component>.keda`.
+
+Before you enable this option, make sure your cluster has the KEDA operator and CRDs installed.
+
+The following example enables all supported KEDA scalers. Set `autoscaling_prometheus_url` to the address of your Prometheus-compatible backend. If your backend is a multi-tenant system such as Grafana Mimir, also set `autoscaling_prometheus_tenant` to your tenant ID so that KEDA sends the `X-Scope-OrgID` header on every scrape request:
+
+```jsonnet
+_config+:: {
+  autoscaling_prometheus_url: 'http://prometheus-operated.monitoring.svc.cluster.local:9090',
+  // autoscaling_prometheus_tenant: 'my-tenant',  // Required for multi-tenant backends (e.g. Grafana Mimir)
+  distributor+: {
+    keda: {
+      enabled: true,
+      min_replicas: 2,
+      max_replicas: 200,
+      target_cpu: '330m',
+    },
+  },
+  metrics_generator+: {
+    keda: {
+      enabled: true,
+      min_replicas: 1,
+      max_replicas: 200,
+      target_cpu: '500m',
+    },
+  },
+  backend_worker+: {
+    keda: {
+      enabled: true,
+      min_replicas: 3,
+      max_replicas: 200,
+      threshold: 200,
+    },
+  },
+  block_builder+: {
+    keda: {
+      enabled: true,
+      min_replicas: 1,
+      max_replicas: 200,
+      partitions_per_instance: 1,
+      pod_selector: 'name=live-store-zone-a',
+    },
+  },
+},
+```
+
+Tempo uses these trigger types when KEDA is enabled: CPU for distributor and metrics-generator, Prometheus for backend-worker, and kubernetes-workload for block-builder. When you enable block-builder autoscaling, Tempo also sets `block_builder.partitions_per_instance` from `_config.block_builder.keda.partitions_per_instance`.
+
 ### Optional: Reduce component system requirements
 
-Smaller ingestion and query volumes could allow the use of smaller resources. If you wish to lower the resources allocated to components, then you can do this via a container configuration. For example, to change the CPU and memory resource allocation for the ingesters.
+Smaller ingestion and query volumes could allow the use of smaller resources. If you wish to lower the resources allocated to components, then you can do this via a container configuration. For example, to change the CPU and memory resource allocation for the block-builders or live-stores.
 
 To change the resources requirements, follow these steps:
 
 1. Open the `environments/tempo/main.jsonnet` file.
-2. Add a new configuration block for the appropriate component (in this case, the ingesters):
+2. Add a new configuration block for the appropriate component (in this case, the block-builder):
    ```jsonnet
-   tempo_ingester_container+:: {
+   tempo_block_builder_container+:: {
        resources+: {
            limits+: {
                cpu: '3',
@@ -376,7 +439,7 @@ To change the resources requirements, follow these steps:
            },
        },
    },
-````
+   ```
 
 3. Save the changes to the file.
 
@@ -392,10 +455,10 @@ Lowering these requirements can impact overall performance.
    ```
 
 {{< admonition type="note" >}}
-If the ingesters don’t start after deploying Tempo with the Tanka command, this may be related to the storage class selected for the Write Ahead Logs. If this is the case, add an appropriate storage class to the ingester configuration. For example, to add a standard instead of fast storage class, add the following to the `config` (not `tempo_config`) section in the previous step:
+If the live-stores don't start after deploying Tempo with the Tanka command, this may be related to the storage class selected for persistent storage. If this is the case, add an appropriate storage class to the live-store configuration. For example, to add a standard instead of fast storage class, add the following to the `_config` (not `tempo_config`) section in the previous step:
 
 ```bash
-  ingester+: {
+  live_store+: {
     pvc_storage_class: 'standard',
   },
 ```
@@ -409,7 +472,7 @@ The Tempo instance will now accept the two configured trace protocols (OTLP gRPC
 - OTLP gRPC: `4317`
 - Jaeger gRPC: `14250`
 
-You can query Tempo using the `query-frontend.tempo.svc.cluster.local` service on port `3200` for Tempo queries or port `16686` or `16687` for Jaeger type queries.
+You can query Tempo using the `query-frontend.tempo.svc.cluster.local` service on port `3200`.
 
 Now that you've configured a Tempo cluster, you'll need to validate your deployment.
 Refer to the [Validate Kubernetes deployment using a test application](/docs/tempo/<TEMPO_VERSION>/set-up-for-tracing/setup-tempo/test/set-up-test-app/) for instructions.

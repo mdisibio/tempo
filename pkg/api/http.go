@@ -38,7 +38,6 @@ const (
 	urlParamStep            = "step"
 	urlParamSince           = "since"
 	urlParamExemplars       = "exemplars"
-	URLParamRF1After        = "rf1After"
 	urlMaxSeries            = "maxSeries"
 	urlInstant              = "instant"
 
@@ -53,12 +52,10 @@ const (
 	urlParamFooterSize       = "footerSize"
 	urlParamDedicatedColumns = "dc"
 
+	urlParamSkipASTTransformations = "skip_ast_transformations"
+
 	// search tags
 	urlParamScope = "scope"
-
-	// generator summary
-	urlParamGroupBy = "groupBy"
-	// urlParamMetric  = "metric"
 
 	HeaderAccept           = "Accept"
 	HeaderContentType      = "Content-Type"
@@ -67,8 +64,7 @@ const (
 	HeaderAcceptLLM        = "application/vnd.grafana.llm"
 	HeaderRecentDataTarget = "Recent-Data-Target"
 
-	PathPrefixQuerier   = "/querier"
-	PathPrefixGenerator = "/generator"
+	PathPrefixQuerier = "/querier"
 
 	PathTraces              = "/api/traces/{traceID}"
 	PathSearch              = "/api/search"
@@ -77,7 +73,6 @@ const (
 	PathEcho                = "/api/echo"
 	PathBuildInfo           = "/api/status/buildinfo"
 	PathUsageStats          = "/status/usage-stats"
-	PathSpanMetrics         = "/api/metrics"
 	PathMetricsQueryInstant = "/api/metrics/query"
 	PathMetricsQueryRange   = "/api/metrics/query_range"
 	PathMCP                 = "/api/mcp"
@@ -167,7 +162,7 @@ func ParseSearchRequestWithDefault(r *http.Request, defaultSpansPerSpanSet uint3
 	vals := r.URL.Query()
 
 	if s, ok := extractQueryParam(vals, urlParamStart); ok {
-		start, err := strconv.ParseInt(s, 10, 32)
+		start, err := strconv.ParseUint(s, 10, 32)
 		if err != nil {
 			return nil, fmt.Errorf("invalid start: %w", err)
 		}
@@ -175,7 +170,7 @@ func ParseSearchRequestWithDefault(r *http.Request, defaultSpansPerSpanSet uint3
 	}
 
 	if s, ok := extractQueryParam(vals, urlParamEnd); ok {
-		end, err := strconv.ParseInt(s, 10, 32)
+		end, err := strconv.ParseUint(s, 10, 32)
 		if err != nil {
 			return nil, fmt.Errorf("invalid end: %w", err)
 		}
@@ -255,33 +250,30 @@ func ParseSearchRequestWithDefault(r *http.Request, defaultSpansPerSpanSet uint3
 	}
 
 	if s, ok := extractQueryParam(vals, urlParamLimit); ok {
-		limit, err := strconv.Atoi(s)
+		limit, err := strconv.ParseUint(s, 10, 32)
 		if err != nil {
 			return nil, fmt.Errorf("invalid limit: %w", err)
 		}
-		if limit <= 0 {
+		if limit == 0 {
 			return nil, errors.New("invalid limit: must be a positive number")
 		}
 		req.Limit = uint32(limit)
 	}
 
 	if s, ok := extractQueryParam(vals, urlParamSpansPerSpanSet); ok {
-		spansPerSpanSet, err := strconv.Atoi(s)
+		spansPerSpanSet, err := strconv.ParseUint(s, 10, 32)
 		if err != nil {
 			return nil, fmt.Errorf("invalid spss: %w", err)
-		}
-		if spansPerSpanSet < 0 {
-			return nil, errors.New("invalid spss: must be a non-negative number")
 		}
 		req.SpansPerSpanSet = uint32(spansPerSpanSet)
 	}
 
-	if s, ok := extractQueryParam(vals, URLParamRF1After); ok {
-		t, err := time.Parse(time.RFC3339, s)
-		if err != nil {
-			return nil, fmt.Errorf("invalid rf1After: %w", err)
+	if s, ok := extractQueryParam(vals, urlParamSkipASTTransformations); ok {
+		for _, name := range strings.Split(s, ",") {
+			if name = strings.TrimSpace(name); name != "" {
+				req.SkipASTTransformations = append(req.SkipASTTransformations, name)
+			}
 		}
-		req.RF1After = t
 	}
 
 	// start and end == 0 is fine
@@ -293,44 +285,6 @@ func ParseSearchRequestWithDefault(r *http.Request, defaultSpansPerSpanSet uint3
 	if req.End <= req.Start {
 		return nil, fmt.Errorf("http parameter start must be before end. received start=%d end=%d", req.Start, req.End)
 	}
-	return req, nil
-}
-
-func ParseSpanMetricsRequest(r *http.Request) (*tempopb.SpanMetricsRequest, error) {
-	req := &tempopb.SpanMetricsRequest{}
-	vals := r.URL.Query()
-
-	groupBy := vals.Get(urlParamGroupBy)
-	req.GroupBy = groupBy
-
-	query := vals.Get(urlParamQuery)
-	req.Query = query
-
-	l := vals.Get(urlParamLimit)
-	if l != "" {
-		limit, err := strconv.Atoi(l)
-		if err != nil {
-			return nil, fmt.Errorf("invalid limit: %w", err)
-		}
-		req.Limit = uint64(limit)
-	}
-
-	if s, ok := extractQueryParam(vals, urlParamStart); ok {
-		start, err := strconv.ParseInt(s, 10, 32)
-		if err != nil {
-			return nil, fmt.Errorf("invalid start: %w", err)
-		}
-		req.Start = uint32(start)
-	}
-
-	if s, ok := extractQueryParam(vals, urlParamEnd); ok {
-		end, err := strconv.ParseInt(s, 10, 32)
-		if err != nil {
-			return nil, fmt.Errorf("invalid end: %w", err)
-		}
-		req.End = uint32(end)
-	}
-
 	return req, nil
 }
 
@@ -348,7 +302,10 @@ func ParseQueryInstantRequest(r *http.Request) (*tempopb.QueryInstantRequest, er
 		req.Query = s
 	}
 
-	start, end, _ := bounds(vals)
+	start, end, err := bounds(vals)
+	if err != nil {
+		return nil, httpgrpc.Error(http.StatusBadRequest, err.Error())
+	}
 	req.Start = uint64(start.UnixNano())
 	req.End = uint64(end.UnixNano())
 
@@ -373,7 +330,10 @@ func ParseQueryRangeRequest(r *http.Request) (*tempopb.QueryRangeRequest, error)
 		req.QueryMode = s
 	}
 
-	start, end, _ := bounds(vals)
+	start, end, err := bounds(vals)
+	if err != nil {
+		return nil, httpgrpc.Error(http.StatusBadRequest, err.Error())
+	}
 	req.Start = uint64(start.UnixNano())
 	req.End = uint64(end.UnixNano())
 
@@ -390,12 +350,12 @@ func ParseQueryRangeRequest(r *http.Request) (*tempopb.QueryRangeRequest, error)
 	}
 
 	startPage, _ := extractQueryParam(vals, urlParamStartPage)
-	if startPage, err := strconv.Atoi(startPage); err == nil {
+	if startPage, err := strconv.ParseUint(startPage, 10, 32); err == nil {
 		req.StartPage = uint32(startPage)
 	}
 
 	pagesToSearch, _ := extractQueryParam(vals, urlParamPagesToSearch)
-	if of, err := strconv.Atoi(pagesToSearch); err == nil {
+	if of, err := strconv.ParseUint(pagesToSearch, 10, 32); err == nil {
 		req.PagesToSearch = uint32(of)
 	}
 
@@ -403,12 +363,12 @@ func ParseQueryRangeRequest(r *http.Request) (*tempopb.QueryRangeRequest, error)
 	req.Version = version
 
 	size, _ := extractQueryParam(vals, urlParamSize)
-	if size, err := strconv.Atoi(size); err == nil {
+	if size, err := strconv.ParseUint(size, 10, 64); err == nil {
 		req.Size_ = uint64(size)
 	}
 
 	footerSize, _ := extractQueryParam(vals, urlParamFooterSize)
-	if footerSize, err := strconv.Atoi(footerSize); err == nil {
+	if footerSize, err := strconv.ParseUint(footerSize, 10, 32); err == nil {
 		req.FooterSize = uint32(footerSize)
 	}
 
@@ -421,12 +381,12 @@ func ParseQueryRangeRequest(r *http.Request) (*tempopb.QueryRangeRequest, error)
 	}
 
 	exemplars, _ := extractQueryParam(vals, urlParamExemplars)
-	if exemplars, err := strconv.Atoi(exemplars); err == nil {
+	if exemplars, err := strconv.ParseUint(exemplars, 10, 32); err == nil {
 		req.Exemplars = uint32(exemplars)
 	}
 
 	maxSeries, _ := extractQueryParam(vals, urlMaxSeries)
-	if maxSeries, err := strconv.Atoi(maxSeries); err == nil {
+	if maxSeries, err := strconv.ParseUint(maxSeries, 10, 32); err == nil {
 		req.MaxSeries = uint32(maxSeries)
 	}
 
@@ -434,6 +394,14 @@ func ParseQueryRangeRequest(r *http.Request) (*tempopb.QueryRangeRequest, error)
 		val, err := strconv.ParseBool(isInstant)
 		if err == nil {
 			req.SetInstant(val)
+		}
+	}
+
+	if s, ok := extractQueryParam(vals, urlParamSkipASTTransformations); ok {
+		for _, name := range strings.Split(s, ",") {
+			if name = strings.TrimSpace(name); name != "" {
+				req.SkipASTTransformations = append(req.SkipASTTransformations, name)
+			}
 		}
 	}
 
@@ -507,6 +475,10 @@ func BuildQueryRangeRequest(req *http.Request, searchReq *tempopb.QueryRangeRequ
 	qb.addParam(urlMaxSeries, strconv.Itoa(int(searchReq.MaxSeries)))
 	if searchReq.HasInstant() {
 		qb.addParam(urlInstant, strconv.FormatBool(searchReq.GetInstant()))
+	}
+
+	if len(searchReq.SkipASTTransformations) > 0 {
+		qb.addParam(urlParamSkipASTTransformations, strings.Join(searchReq.SkipASTTransformations, ","))
 	}
 
 	req.URL.RawQuery = qb.query()
@@ -749,8 +721,8 @@ func BuildSearchRequest(req *http.Request, searchReq *tempopb.SearchRequest) (*h
 		qb.addParam(urlParamTags, builder.String())
 	}
 
-	if !searchReq.RF1After.IsZero() {
-		qb.addParam(URLParamRF1After, searchReq.RF1After.Format(time.RFC3339))
+	if len(searchReq.SkipASTTransformations) > 0 {
+		qb.addParam(urlParamSkipASTTransformations, strings.Join(searchReq.SkipASTTransformations, ","))
 	}
 
 	req.URL.RawQuery = qb.query()
@@ -805,20 +777,20 @@ func extractDateRangeParams(vals url.Values) (start, end, since string) {
 	return
 }
 
-// ValidateAndSanitizeRequest validates params for trace by id api
-// return values are (blockStart, blockEnd, queryMode, start, end, rf1After, error)
-func ValidateAndSanitizeRequest(r *http.Request) (string, string, string, int64, int64, time.Time, error) {
+// ParseTraceByIDRequest parses and validates params for the trace by id API.
+// return values are (blockStart, blockEnd, queryMode, start, end, error)
+// start and end are zero time.Time values when not provided by the caller.
+func ParseTraceByIDRequest(r *http.Request) (string, string, string, time.Time, time.Time, error) {
 	vals := r.URL.Query()
 
 	q, _ := extractQueryParam(vals, QueryModeKey)
 
 	// validate queryMode. it should either be empty or one of (QueryModeIngesters|QueryModeBlocks|QueryModeAll)
 	var queryMode string
-	var startTime int64
-	var endTime int64
+	var startTime time.Time
+	var endTime time.Time
 	var blockStart string
 	var blockEnd string
-	var rf1After time.Time
 
 	switch {
 	case len(q) == 0 || q == QueryModeAll:
@@ -830,18 +802,18 @@ func ValidateAndSanitizeRequest(r *http.Request) (string, string, string, int64,
 	case q == QueryModeExternal:
 		queryMode = QueryModeExternal
 	default:
-		return "", "", "", 0, 0, time.Time{}, fmt.Errorf("invalid value for mode %s", q)
+		return "", "", "", time.Time{}, time.Time{}, fmt.Errorf("invalid value for mode %s", q)
 	}
 
 	// no need to validate/sanitize other parameters if queryMode == QueryModeIngesters
 	if queryMode == QueryModeIngesters {
-		return "", "", queryMode, 0, 0, time.Time{}, nil
+		return "", "", queryMode, time.Time{}, time.Time{}, nil
 	}
 
 	if start, ok := extractQueryParam(vals, BlockStartKey); ok {
 		_, err := uuid.Parse(start)
 		if err != nil {
-			return "", "", "", 0, 0, time.Time{}, fmt.Errorf("invalid value for blockstart: %w", err)
+			return "", "", "", time.Time{}, time.Time{}, fmt.Errorf("invalid value for blockstart: %w", err)
 		}
 		blockStart = start
 	} else {
@@ -851,7 +823,7 @@ func ValidateAndSanitizeRequest(r *http.Request) (string, string, string, int64,
 	if end, ok := extractQueryParam(vals, BlockEndKey); ok {
 		_, err := uuid.Parse(end)
 		if err != nil {
-			return "", "", "", 0, 0, time.Time{}, fmt.Errorf("invalid value for blockEnd: %w", err)
+			return "", "", "", time.Time{}, time.Time{}, fmt.Errorf("invalid value for blockEnd: %w", err)
 		}
 		blockEnd = end
 	} else {
@@ -859,38 +831,26 @@ func ValidateAndSanitizeRequest(r *http.Request) (string, string, string, int64,
 	}
 
 	if s, ok := extractQueryParam(vals, urlParamStart); ok {
-		var err error
-		startTime, err = strconv.ParseInt(s, 10, 64)
+		startUnix, err := strconv.ParseInt(s, 10, 64)
 		if err != nil {
-			return "", "", "", 0, 0, time.Time{}, fmt.Errorf("invalid start: %w", err)
+			return "", "", "", time.Time{}, time.Time{}, fmt.Errorf("invalid start: %w", err)
 		}
-	} else {
-		startTime = 0
+		startTime = time.Unix(startUnix, 0)
 	}
 
 	if s, ok := extractQueryParam(vals, urlParamEnd); ok {
-		var err error
-		endTime, err = strconv.ParseInt(s, 10, 64)
+		endUnix, err := strconv.ParseInt(s, 10, 64)
 		if err != nil {
-			return "", "", "", 0, 0, time.Time{}, fmt.Errorf("invalid end: %w", err)
+			return "", "", "", time.Time{}, time.Time{}, fmt.Errorf("invalid end: %w", err)
 		}
-	} else {
-		endTime = 0
+		endTime = time.Unix(endUnix, 0)
 	}
 
-	if startTime != 0 && endTime != 0 && endTime <= startTime {
-		return "", "", "", 0, 0, time.Time{}, fmt.Errorf("http parameter start must be before end. received start=%d end=%d", startTime, endTime)
+	if !startTime.IsZero() && !endTime.IsZero() && !endTime.After(startTime) {
+		return "", "", "", time.Time{}, time.Time{}, fmt.Errorf("http parameter start must be before end. received start=%d end=%d", startTime.Unix(), endTime.Unix())
 	}
 
-	if rf1AfterStr, ok := extractQueryParam(vals, URLParamRF1After); ok {
-		var err error
-		rf1After, err = time.Parse(time.RFC3339, rf1AfterStr)
-		if err != nil {
-			return "", "", "", 0, 0, time.Time{}, fmt.Errorf("invalid rf1After: %w", err)
-		}
-	}
-
-	return blockStart, blockEnd, queryMode, startTime, endTime, rf1After, nil
+	return blockStart, blockEnd, queryMode, startTime, endTime, nil
 }
 
 func ReadBodyToBuffer(resp *http.Response) (*bytes.Buffer, error) {

@@ -25,11 +25,14 @@ import (
 // Copied from Cortex
 func TestConfigTagsYamlMatchJson(t *testing.T) {
 	overrides := reflect.TypeOf(LegacyOverrides{})
-	n := overrides.NumField()
 	var mismatch []string
 
-	for i := 0; i < n; i++ {
-		field := overrides.Field(i)
+	for field := range overrides.Fields() {
+
+		// Skip fields intentionally excluded from JSON
+		if field.Tag.Get("json") == "-" {
+			continue
+		}
 
 		// Note that we aren't requiring YAML and JSON tags to match, just that
 		// they either both exist or both don't exist.
@@ -60,12 +63,6 @@ max_bytes_per_trace: 100_000
 block_retention: 24h
 compaction_window: 4h
 
-per_tenant_override_config: /etc/Overrides.yaml
-per_tenant_override_period: 1m
-
-metrics_generator_send_queue_size: 10
-metrics_generator_send_workers: 1
-
 max_search_duration: 5m
 `
 	inputJSON := `
@@ -83,12 +80,6 @@ max_search_duration: 5m
 	"block_retention": "24h",
 	"compaction_window": "4h",
 
-	"per_tenant_override_config": "/etc/Overrides.yaml",
-	"per_tenant_override_period": "1m",
-
-	"metrics_generator_send_queue_size": 10,
-	"metrics_generator_send_workers": 1,
-
 	"max_search_duration": "5m"
 }`
 
@@ -101,6 +92,14 @@ max_search_duration: 5m
 	require.NoError(t, err, "expected to be able to unmarshal from JSON")
 
 	assert.Equal(t, limitsYAML, limitsJSON)
+}
+
+func TestConfig_DefaultIngestionLimits(t *testing.T) {
+	cfg := Config{}
+	cfg.RegisterFlagsAndApplyDefaults(flag.NewFlagSet("test", flag.ContinueOnError))
+
+	assert.Equal(t, 30_000_000, cfg.Defaults.Ingestion.RateLimitBytes)
+	assert.Equal(t, 30_000_000, cfg.Defaults.Ingestion.BurstSizeBytes)
 }
 
 func TestConfig_legacy(t *testing.T) {
@@ -143,12 +142,6 @@ metrics_generator_processor_span_metrics_dimension_mappings:
       - 'bar'
     join: 'baz'
 metrics_generator_processor_span_metrics_enable_target_info: true
-metrics_generator_processor_local_blocks_max_live_traces: 8
-metrics_generator_processor_local_blocks_max_block_duration: 9s
-metrics_generator_processor_local_blocks_max_block_bytes: 10
-metrics_generator_processor_local_blocks_flush_check_period: 11s
-metrics_generator_processor_local_blocks_trace_idle_period: 12s
-metrics_generator_processor_local_blocks_complete_block_timeout: 13s
 metrics_generator_generate_native_histograms: true
 metrics_generator_native_histogram_bucket_factor: 1.1
 metrics_generator_native_histogram_max_bucket_number: 100
@@ -233,13 +226,6 @@ defaults:
           - bar
           join: baz
         enable_target_info: true
-      local_blocks:
-        max_live_traces: 8
-        max_block_duration: 9s
-        max_block_bytes: 10
-        flush_check_period: 11s
-        trace_idle_period: 12s
-        complete_block_timeout: 13s
   forwarders:
   - foo
   global:
@@ -349,7 +335,7 @@ func ensureAllFieldsPopulated(t *testing.T, o LegacyOverrides) {
 		fieldName := structType.Field(i).Name
 
 		// Skip certain fields that can be zero in valid configs
-		skip := []string{"IngestionArtificialDelay", "MetricsGeneratorSpanNameSanitization"}
+		skip := []string{"IngestionArtificialDelay", "MetricsGeneratorSpanNameSanitization", "Extensions"}
 		if slices.Contains(skip, fieldName) {
 			continue
 		}
@@ -436,6 +422,7 @@ func generateTestLegacyOverrides() LegacyOverrides {
 		MetricsGeneratorProcessorServiceGraphsEnableMessagingSystemLatencyHistogram: boolPtr(true),
 		MetricsGeneratorProcessorServiceGraphsEnableVirtualNodeLabel:                boolPtr(true),
 		MetricsGeneratorProcessorServiceGraphsSpanMultiplierKey:                     "custom_key",
+		MetricsGeneratorProcessorServiceGraphsEnableTraceStateSpanMultiplier:        boolPtr(true),
 		MetricsGeneratorProcessorSpanMetricsHistogramBuckets:                        []float64{1.0, 2.0, 5.0},
 		MetricsGeneratorProcessorSpanMetricsDimensions:                              []string{"dimension-1", "dimension-2"},
 		MetricsGeneratorProcessorSpanMetricsIntrinsicDimensions:                     map[string]bool{"dim-1": true, "dim-2": false},
@@ -462,34 +449,31 @@ func generateTestLegacyOverrides() LegacyOverrides {
 				Join:        "join-1",
 			},
 		},
-		MetricsGeneratorProcessorSpanMetricsEnableTargetInfo:             boolPtr(true),
-		MetricsGeneratorProcessorSpanMetricsTargetInfoExcludedDimensions: []string{"excluded-dim-1", "excluded-dim-2"},
-		MetricsGeneratorProcessorSpanMetricsEnableInstanceLabel:          boolPtr(false),
-		MetricsGeneratorProcessorSpanMetricsSpanMultiplierKey:            "custom_key",
-		MetricsGeneratorProcessorLocalBlocksMaxLiveTraces:                100,
-		MetricsGeneratorProcessorLocalBlocksMaxBlockDuration:             10 * time.Minute,
-		MetricsGeneratorProcessorLocalBlocksMaxBlockBytes:                1024 * 1024,
-		MetricsGeneratorProcessorLocalBlocksFlushCheckPeriod:             30 * time.Second,
-		MetricsGeneratorProcessorLocalBlocksTraceIdlePeriod:              5 * time.Minute,
-		MetricsGeneratorProcessorLocalBlocksCompleteBlockTimeout:         30 * time.Minute,
-		MetricsGeneratorProcessorHostInfoHostIdentifiers:                 []string{"host-id-1", "host-id-2"},
-		MetricsGeneratorProcessorHostInfoMetricName:                      "host_info",
-		MetricsGeneratorIngestionSlack:                                   1 * time.Minute,
-		MetricsGeneratorNativeHistogramBucketFactor:                      1.5,
-		MetricsGeneratorNativeHistogramMaxBucketNumber:                   200,
-		MetricsGeneratorNativeHistogramMinResetDuration:                  10 * time.Minute,
-		MetricsGeneratorSpanNameSanitization:                             "",
+		MetricsGeneratorProcessorSpanMetricsEnableTargetInfo:               boolPtr(true),
+		MetricsGeneratorProcessorSpanMetricsTargetInfoExcludedDimensions:   []string{"excluded-dim-1", "excluded-dim-2"},
+		MetricsGeneratorProcessorSpanMetricsEnableInstanceLabel:            boolPtr(false),
+		MetricsGeneratorProcessorSpanMetricsSpanMultiplierKey:              "custom_key",
+		MetricsGeneratorProcessorSpanMetricsEnableTraceStateSpanMultiplier: boolPtr(true),
+		MetricsGeneratorProcessorHostInfoHostIdentifiers:                   []string{"host-id-1", "host-id-2"},
+		MetricsGeneratorProcessorHostInfoMetricName:                        "host_info",
+		MetricsGeneratorIngestionSlack:                                     1 * time.Minute,
+		MetricsGeneratorNativeHistogramBucketFactor:                        1.5,
+		MetricsGeneratorNativeHistogramMaxBucketNumber:                     200,
+		MetricsGeneratorNativeHistogramMinResetDuration:                    10 * time.Minute,
+		MetricsGeneratorSpanNameSanitization:                               "",
 
 		BlockRetention:     model.Duration(7 * 24 * time.Hour),
 		CompactionDisabled: true,
 		CompactionWindow:   model.Duration(4 * time.Hour),
 
-		MaxBytesPerTagValuesQuery:  1000,
-		MaxBlocksPerTagValuesQuery: 100,
+		MaxBytesPerTagValuesQuery:     1000,
+		MaxBlocksPerTagValuesQuery:    100,
+		MaxConditionGroupsPerTagQuery: 5,
 
-		MaxSearchDuration:  model.Duration(10 * time.Minute),
-		MaxMetricsDuration: model.Duration(30 * time.Minute),
-		UnsafeQueryHints:   true,
+		MaxSearchDuration:    model.Duration(10 * time.Minute),
+		MaxMetricsDuration:   model.Duration(30 * time.Minute),
+		UnsafeQueryHints:     true,
+		MetricsSpanOnlyFetch: boolPtr(true),
 
 		MaxBytesPerTrace: 10 * 1024 * 1024,
 

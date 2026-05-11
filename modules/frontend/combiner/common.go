@@ -238,13 +238,14 @@ func (c *genericCombiner[T]) GRPCDiff() (T, error) {
 
 func (c *genericCombiner[T]) GRPCSegment(response T, maxSize int) ([]T, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	segment := c.segment
+	c.mu.Unlock()
 
-	if c.segment == nil {
+	if segment == nil {
 		return nil, errors.New("grpc response segmentation not supported for response type: " + reflect.TypeOf(response).String())
 	}
 
-	return c.segment(response, maxSize), nil
+	return segment(response, maxSize), nil
 }
 
 func (c *genericCombiner[T]) erroredResponse() (*http.Response, error) {

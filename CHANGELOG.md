@@ -2,21 +2,7 @@
 
 * [FEATURE] Add span profiling support via otelpyroscope. Enable with `span_profiling: true` (or `-span-profiling` CLI flag) to attach pprof labels to OTel spans. [#7063](https://github.com/grafana/tempo/pull/7063) (@simonswine)
 * [BUGFIX] Fix tempo-vulture ignoring `-tempo-push-tls` flag in normal operating mode. [#6974](https://github.com/grafana/tempo/pull/6974) (@xaque208)
-* [ENHANCEMENT] **BREAKING CHANGE** Query-frontend: new job sharding approach for trace lookups, using a new config option `blocks_per_shard` which replaces `query_shards`. [#7105](https://github.com/grafana/tempo/pull/7105) (@mdisibio)
-* [ENHANCEMENT] jsonnet: add `autoscaling_prometheus_url` and `autoscaling_prometheus_tenant` top-level config fields for KEDA autoscaling. Setting `autoscaling_prometheus_tenant` sends an `X-Scope-OrgID` header on all Prometheus trigger requests, which is required when the backend is a multi-tenant system such as Grafana Mimir. [#7099](https://github.com/grafana/tempo/pull/7099) (@zachfi)
-* [FEATURE] Make individual AST transformations skippable via config and query hints [#7012](https://github.com/grafana/tempo/pull/7012) (@stoewer)
 * [BUGFIX] live-store: Fix panic in legacy tag-based search against vParquet5 blocks when matching attributes stored in integer dedicated columns (for example `/api/search?http.status_code=500`). [#7135](https://github.com/grafana/tempo/pull/7135) (@mdisibio)
-* [BUGFIX] backend-scheduler: fix redaction batch not cleaned up after dead-job timeout, leaving tenant permanently blocked from new redaction submissions and compaction. [#6992](https://github.com/grafana/tempo/pull/6992) (@zalegrala)
-* [BUGFIX] backend-scheduler: fix outstanding-blocks metric suppressed to zero during active redaction batch, causing autoscaler to scale down workers mid-redaction. [#6992](https://github.com/grafana/tempo/pull/6992) (@zalegrala)
-* [BUGFIX] backend-scheduler: fix O(N) lock contention in GetJobForWorker under concurrent worker load; replace shard scan with O(1) index lookup. [#6992](https://github.com/grafana/tempo/pull/6992) (@zalegrala)
-* [BUGFIX] livestore: recover from panics in `iterateBlocks` per-block paths so a panic in vparquet/parquetquery (e.g. malformed `ByteArray` values) returns an error instead of crashing the process. [#7134](https://github.com/grafana/tempo/pull/7134) (@zhxiaogg)
-
-# v3.0.0-rc.1
-
-* [CHANGE] Stop publishing 32-bit ARM binary archives. Release artifacts continue to include amd64 and arm64 binaries. [#7106](https://github.com/grafana/tempo/pull/7106) (@javiermolinar)
-
-# v3.0.0-rc.0
-
 * [CHANGE] **BREAKING CHANGE** Remove duplicate "compaction" prefix from CompactorConfig CLI flags. Affected flags: `compaction.block-retention`, `compaction.max-objects-per-block`, `compaction.max-block-bytes`, `compaction.compaction-window`. [#6909](https://github.com/grafana/tempo/pull/6909) (@electron0zero)
 * [CHANGE] **BREAKING CHANGE** Enable RetryInfo by default. `distributor.retry_after_on_resource_exhausted` now defaults to `5s` (was `0`) so OTLP clients receive a retry hint on `ResourceExhausted` errors. [#7088](https://github.com/grafana/tempo/pull/7088) (@electron0zero)
   Set to `0` to disable cluster-wide, or set the per-tenant override `ingestion.retry_info_enabled: false` to disable for a single tenant.

@@ -242,7 +242,7 @@ func (c *genericCombiner[T]) GRPCSegment(response T, maxSize int) ([]T, error) {
 	c.mu.Unlock()
 
 	if segment == nil {
-		return nil, errors.New("grpc response segmentation not supported for response type: " + reflect.TypeOf(response).String())
+		return nil, fmt.Errorf("grpc response segmentation not supported for response type:  %T", response)
 	}
 
 	return segment(response, maxSize), nil

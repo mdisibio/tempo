@@ -179,7 +179,7 @@ func segmentSearchResponse(response *tempopb.SearchResponse, maxSize int) []*tem
 	startNextPacket()
 
 	for _, t := range response.Traces {
-		traceSz := t.Size()
+		traceSz := protoSizeMath(t)
 
 		// Start a new packet if there isn't room for this entry,
 		// unless it's the first one, that way we always try to fit at least one.

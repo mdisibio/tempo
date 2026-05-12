@@ -4,8 +4,6 @@ import (
 	"github.com/grafana/tempo/pkg/api"
 	"github.com/grafana/tempo/pkg/collector"
 	"github.com/grafana/tempo/pkg/tempopb"
-
-	math_bits "math/bits"
 )
 
 var (
@@ -155,15 +153,6 @@ func segmentSearchTagsResponse(response *tempopb.SearchTagsResponse, maxSize int
 	}
 
 	return out
-}
-
-// protoStringSize returns the size in bytes of a string in a repeated string field.
-// Size is 1 byte for the field number, the string content itself, and then the string length encoded as varint.
-func protoStringSize(s string) int {
-	l := len(s)
-	// Calculation copied from sovTempo in tempopb.
-	varIntSize := (math_bits.Len64(uint64(l)|1) + 6) / 7
-	return 1 + l + varIntSize
 }
 
 // segmentSearchTagsV2Response splits response into one or more SearchTagsV2Response values, each within

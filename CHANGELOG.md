@@ -1,6 +1,7 @@
 ## main / unreleased
 
 * [FEATURE] Make individual AST transformations skippable via config and query hints [#7012](https://github.com/grafana/tempo/pull/7012) (@stoewer)
+* [ENHANCEMENT] tempodb: add `tempodb_cache_store_size_bytes` histogram labelled by `role` recording the size of every item written to the backend cache. [#7152](https://github.com/grafana/tempo/pull/7152) (@javiermolinar)
 * [ENHANCEMENT] Add `TempoDistributorKafkaProduceFailing` alert that triggers when Kafka records cannot be produced by the distributor. [#7148](https://github.com/grafana/tempo/pull/7148) (@javiermolinar)
 * [ENHANCEMENT] live-store: lock-free block reads via `atomic.Pointer[blockSnapshot]`; block deletion is two-phase (tombstone meta.json → meta.deleted.json, then reclaim files after `block_reclaim_grace`). Crash-safe; startup sweep reclaims any tombstoned dirs left by an unclean shutdown. [#7132](https://github.com/grafana/tempo/pull/7132) (@zhxiaogg)
 * [ENHANCEMENT] **BREAKING CHANGE** Query-frontend: new job sharding approach for trace lookups, using a new config option `blocks_per_shard` which replaces `query_shards`. [#7105](https://github.com/grafana/tempo/pull/7105) (@mdisibio)

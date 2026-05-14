@@ -1786,7 +1786,7 @@ func BenchmarkIterators(b *testing.B) {
 func BenchmarkBackendBlockQueryRange(b *testing.B) {
 	testCases := []string{
 		"{} | rate()",
-		"{} | rate() with(spanonly_fetch=true)",
+		"{} | rate() with(spanonly_fetch=false)",
 		"{} | rate() with(sample=true)",
 		"{} | rate() by (span.http.status_code)",
 		"{} | rate() by (resource.service.name)",

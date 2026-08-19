@@ -131,7 +131,7 @@ func (cfg *Config) RegisterFlagsAndApplyDefaults(prefix string, f *flag.FlagSet)
 			MaxSpansPerSpanSet:     100,
 		},
 		SLO:                     slo,
-		RepairRootSpanMaxTraces: 5,
+		RepairRootSpanMaxTraces: 100,
 	}
 	cfg.TraceByID = TraceByIDConfig{
 		QueryShards:    50,

@@ -2,9 +2,11 @@ package frontend
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"time"
 
 	"github.com/go-kit/log"
@@ -27,6 +29,10 @@ const rootSpanServiceNameKey = "service.name"
 // fetch can't hold up an otherwise-complete search response.
 const rootSpanRepairTimeout = 2 * time.Second
 
+// rootSpanRepairTimeRangePadding bounds the trace-by-ID sub-query to the window around the
+// start time found by the search hit, instead of scanning every block for the trace ID.
+const rootSpanRepairTimeRangePadding = time.Hour
+
 // urlParamTraceID is the mux var / log key name used for a trace ID, matching api.urlParamTraceID.
 const urlParamTraceID = "traceID"
 
@@ -36,11 +42,11 @@ const urlParamTraceID = "traceID"
 // of whether those blocks were ever compacted together, which is why opening a trace directly
 // always shows the root span even when TraceQL search can't.
 func newRootSpanRepairFunc(ctx context.Context, tenant string, headers http.Header, apiPrefix string, tracePipeline pipeline.AsyncRoundTripper[combiner.PipelineResponse], o overrides.Interface, dataAccessController DataAccessController, logger log.Logger) combiner.RootSpanRepairFunc {
-	return func(traceID string) (serviceName, spanName string, ok bool) {
+	return func(traceID string, startTimeUnixNano uint64) (serviceName, spanName string, ok bool) {
 		repairCtx, cancel := context.WithTimeout(ctx, rootSpanRepairTimeout)
 		defer cancel()
 
-		req := buildRootSpanRepairRequest(repairCtx, apiPrefix, traceID, headers)
+		req := buildRootSpanRepairRequest(repairCtx, apiPrefix, traceID, startTimeUnixNano, headers)
 
 		var traceRedactor combiner.TraceRedactor
 		if dataAccessController != nil {
@@ -84,15 +90,25 @@ func newRootSpanRepairFunc(ctx context.Context, tenant string, headers http.Head
 	}
 }
 
-func buildRootSpanRepairRequest(ctx context.Context, apiPrefix string, traceID string, headers http.Header) *http.Request {
+func buildRootSpanRepairRequest(ctx context.Context, apiPrefix string, traceID string, startTimeUnixNano uint64, headers http.Header) *http.Request {
 	u := &url.URL{
 		Path: path.Join(apiPrefix, "/api/v2/traces", traceID),
+	}
+
+	if startTimeUnixNano != 0 {
+		startTime := time.Unix(0, int64(startTimeUnixNano))
+		q := u.Query()
+		q.Set(traceByIDStartParam, strconv.FormatInt(startTime.Add(-rootSpanRepairTimeRangePadding).Unix(), 10))
+		q.Set(traceByIDEndParam, strconv.FormatInt(startTime.Add(rootSpanRepairTimeRangePadding).Unix(), 10))
+		u.RawQuery = q.Encode()
 	}
 
 	reqHeaders := headers.Clone()
 	if reqHeaders == nil {
 		reqHeaders = http.Header{}
 	}
+
+	fmt.Println("repair url:", u.String())
 
 	req := (&http.Request{
 		Method: http.MethodGet,

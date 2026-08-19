@@ -863,7 +863,7 @@ func TestSearchRootSpanRepair(t *testing.T) {
 
 	t.Run("repairs traces missing root service name", func(t *testing.T) {
 		var repairedIDs []string
-		repair := func(traceID string) (string, string, bool) {
+		repair := func(traceID string, _ uint64) (string, string, bool) {
 			repairedIDs = append(repairedIDs, traceID)
 			return "envoy", "ingress", true
 		}
@@ -884,7 +884,7 @@ func TestSearchRootSpanRepair(t *testing.T) {
 	})
 
 	t.Run("falls back to placeholder text when repair can't help", func(t *testing.T) {
-		repair := func(_ string) (string, string, bool) { return "", "", false }
+		repair := func(_ string, _ uint64) (string, string, bool) { return "", "", false }
 
 		c := NewTypedSearch(0, false, marshalingFormat, false, repair, 5)
 		err := c.AddResponse(toHTTPResponseWithFormat(t, &tempopb.SearchResponse{
@@ -914,7 +914,7 @@ func TestSearchRootSpanRepair(t *testing.T) {
 	})
 
 	t.Run("does not repair traces that already have a root service name", func(t *testing.T) {
-		repair := func(_ string) (string, string, bool) {
+		repair := func(_ string, _ uint64) (string, string, bool) {
 			t.Fatal("repair should not be called for traces that already have root info")
 			return "", "", false
 		}
@@ -934,7 +934,7 @@ func TestSearchRootSpanRepair(t *testing.T) {
 
 	t.Run("bounded by maxRepairs", func(t *testing.T) {
 		attempts := 0
-		repair := func(_ string) (string, string, bool) {
+		repair := func(_ string, _ uint64) (string, string, bool) {
 			attempts++
 			return "svc", "span", true
 		}

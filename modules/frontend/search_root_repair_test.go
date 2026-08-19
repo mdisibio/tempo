@@ -1,7 +1,11 @@
 package frontend
 
 import (
+	"context"
+	"net/http"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -102,5 +106,24 @@ func TestRootSpanFromTrace(t *testing.T) {
 		require.True(t, ok)
 		require.Equal(t, "early", svc)
 		require.Equal(t, "early-root", name)
+	})
+}
+
+func TestBuildRootSpanRepairRequest(t *testing.T) {
+	t.Run("sets a +/- 1 hour time range around the start time", func(t *testing.T) {
+		startTime := time.Unix(1_700_000_000, 0)
+		req := buildRootSpanRepairRequest(context.Background(), "", "1234", uint64(startTime.UnixNano()), http.Header{}) //nolint:gosec // test-only overflow
+
+		q := req.URL.Query()
+		require.Equal(t, strconv.FormatInt(startTime.Add(-time.Hour).Unix(), 10), q.Get(traceByIDStartParam))
+		require.Equal(t, strconv.FormatInt(startTime.Add(time.Hour).Unix(), 10), q.Get(traceByIDEndParam))
+	})
+
+	t.Run("omits the time range when the start time is unknown", func(t *testing.T) {
+		req := buildRootSpanRepairRequest(context.Background(), "", "1234", 0, http.Header{})
+
+		q := req.URL.Query()
+		require.Empty(t, q.Get(traceByIDStartParam))
+		require.Empty(t, q.Get(traceByIDEndParam))
 	})
 }

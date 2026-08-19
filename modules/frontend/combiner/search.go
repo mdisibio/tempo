@@ -35,8 +35,10 @@ var _ GRPCCombiner[*tempopb.SearchResponse] = (*genericCombiner[*tempopb.SearchR
 // RootSpanRepairFunc attempts to resolve the root service and span name for a trace whose
 // search metadata is missing that information, most commonly because the block fragment that
 // matched the search filter was written before the trace's root span arrived and was never
-// compacted together with the fragment that holds it. It returns ok=false if it can't help.
-type RootSpanRepairFunc func(traceID string) (serviceName, spanName string, ok bool)
+// compacted together with the fragment that holds it. startTimeUnixNano is the start time found
+// by the search hit, used to narrow the trace-by-ID lookup's time range; it may be 0 if unknown.
+// It returns ok=false if it can't help.
+type RootSpanRepairFunc func(traceID string, startTimeUnixNano uint64) (serviceName, spanName string, ok bool)
 
 // NewSearch returns a search combiner
 func NewSearch(limit int, keepMostRecent bool, marshalingFormat api.MarshallingFormat, padTraceIDs bool, repair RootSpanRepairFunc, maxRepairs int) Combiner {
@@ -173,7 +175,7 @@ func repairMissingRootSpans(results []*tempopb.TraceSearchMetadata, repair RootS
 		}
 		attempted++
 
-		if serviceName, spanName, ok := repair(tr.TraceID); ok {
+		if serviceName, spanName, ok := repair(tr.TraceID, tr.StartTimeUnixNano); ok {
 			tr.RootServiceName = serviceName
 			tr.RootTraceName = spanName
 		}

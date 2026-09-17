@@ -53,6 +53,31 @@ const (
 	cacheOutcomeMiss = "miss"
 )
 
+// admissionVivifyTTL is how long a "first sighting" of a key is remembered
+// before it's forgotten. A repeat request for the same key within this
+// window is what triggers caching it; one that never repeats never gets
+// cached at all. Only applied in ReadRange (footer/column-idx/offset-idx/
+// page reads all flow through here - see cachedReaderAt.ReadAt in
+// vparquet5/readers.go). Read (bloom/trace-id-idx) is intentionally left on
+// the old always-cache behavior for now.
+const admissionVivifyTTL = int32(5 * 60)
+
+// admissionKeyPrefix namespaces every key touched by the admission-filtered
+// path below into its own keyspace, distinct from the plain keys a querier
+// without this code (an older binary mid-rollout, or any other classic-
+// protocol reader of this cache) would use for the exact same logical
+// content. This is deliberate, not an oversight: a memcached vivify stub
+// (from MetaGet's N flag) is indistinguishable from a real, legitimately
+// empty value to any reader using the classic get/set protocol, so an old
+// querier doing a plain `get` on the real key would treat a stub as a valid
+// zero-length hit - silently serving garbage. Giving this path its own key
+// namespace means old and new queriers simply read/write different cache
+// entries during a mixed rollout; nothing is shared, so nothing can
+// misinterpret the other's data. Once a rollout finishes, the old unprefixed
+// entries are simply never touched again and age out via their own TTL -
+// no explicit cleanup needed.
+const admissionKeyPrefix = "mg:"
+
 type BloomConfig struct {
 	CacheMinCompactionLevel uint8         `yaml:"cache_min_compaction_level"`
 	CacheMaxBlockAge        time.Duration `yaml:"cache_max_block_age"`
@@ -152,11 +177,15 @@ func (r *readerWriter) Read(ctx context.Context, name string, keypath backend.Ke
 func (r *readerWriter) ReadRange(ctx context.Context, name string, keypath backend.KeyPath, offset uint64, buffer []byte, cacheInfo *backend.CacheInfo) error {
 	var k string
 	var role string
+	shouldStore := true
 	cache := r.cacheFor(cacheInfo)
 	if cache != nil {
 		role = string(cacheInfo.Role)
-		k = strings.Join(append(keypath, name, strconv.Itoa(int(offset)), strconv.Itoa(len(buffer))), ":")
-		b, found := cache.FetchKey(ctx, k)
+		k = admissionKeyPrefix + strings.Join(append(keypath, name, strconv.Itoa(int(offset)), strconv.Itoa(len(buffer))), ":")
+
+		b, found, ss := cache.FetchKeyWithMeta(ctx, k, admissionVivifyTTL)
+		shouldStore = ss
+
 		if found {
 			cacheRequests.WithLabelValues(role, cacheOutcomeHit).Inc()
 			cacheRequestBytes.WithLabelValues(role, cacheOutcomeHit).Add(float64(len(b)))
@@ -172,7 +201,9 @@ func (r *readerWriter) ReadRange(ctx context.Context, name string, keypath backe
 	err := r.nextReader.ReadRange(ctx, name, keypath, offset, buffer, nil)
 	if err == nil && cache != nil {
 		cacheRequestBytes.WithLabelValues(role, cacheOutcomeMiss).Add(float64(len(buffer)))
-		store(ctx, cache, cacheInfo.Role, k, buffer)
+		if shouldStore {
+			store(ctx, cache, cacheInfo.Role, k, buffer)
+		}
 	}
 
 	return err

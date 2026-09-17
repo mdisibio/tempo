@@ -123,6 +123,15 @@ func (c *RedisCache) FetchKey(ctx context.Context, key string) (buf []byte, foun
 	return buf, true
 }
 
+// FetchKeyWithMeta implements Cache. Redis has no equivalent of memcached's
+// meta-get vivify mechanism here, so this backend doesn't support admission
+// filtering: it always reports shouldStore=true on a miss, matching
+// FetchKey's unconditional-cache-on-miss behavior, and ignores vivifyTTL.
+func (c *RedisCache) FetchKeyWithMeta(ctx context.Context, key string, _ int32) (buf []byte, found bool, shouldStore bool) {
+	buf, found = c.FetchKey(ctx, key)
+	return buf, found, !found
+}
+
 // Store stores the key in the cache.
 func (c *RedisCache) Store(ctx context.Context, keys []string, bufs [][]byte) {
 	_ = measureRequest(ctx, "RedisCache.MSet", c.requestDuration, redisStatusCode, func(ctx context.Context) error {

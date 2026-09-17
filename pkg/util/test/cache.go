@@ -46,6 +46,14 @@ func (m *mockClient) FetchKey(_ context.Context, key string) (buf []byte, found 
 	return buf, false
 }
 
+// FetchKeyWithMeta implements cache.Cache. This mock has no admission
+// filtering behavior, so it always reports shouldStore=true on a miss,
+// matching FetchKey's unconditional-cache-on-miss behavior.
+func (m *mockClient) FetchKeyWithMeta(ctx context.Context, key string, _ int32) (buf []byte, found bool, shouldStore bool) {
+	buf, found = m.FetchKey(ctx, key)
+	return buf, found, !found
+}
+
 func (m *mockClient) Remove(_ context.Context, keys []string) {
 	m.Lock()
 	defer m.Unlock()

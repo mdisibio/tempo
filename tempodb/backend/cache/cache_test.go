@@ -295,8 +295,10 @@ func TestCacheKeys(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, expectedData, actualData)
 
-	// ReadRange : seed data at expected key
-	expectedKey = "bar:baz:foo:10:10" // keypath + object name + offset + length
+	// ReadRange : seed data at expected key. ReadRange namespaces its keys
+	// under admissionKeyPrefix (see the admission-filter key-collision
+	// investigation) - it's a different keyspace than Read's.
+	expectedKey = admissionKeyPrefix + "bar:baz:foo:10:10" // keypath + object name + offset + length
 	expectedData = []byte("test-range")
 	provider.CacheFor(role).Store(ctx, []string{expectedKey}, [][]byte{expectedData})
 

@@ -30,6 +30,16 @@ type MemcachedClient interface {
 	Set(item *memcache.Item) error
 	Get(key string, opts ...memcache.Option) (*memcache.Item, error)
 	Delete(key string) error
+	// MetaGet behaves like Get on a hit: Found is true and Value holds the
+	// real item content. The extra behavior is only on a miss: if
+	// vivifyTTL > 0, it atomically vivifies a short-lived stub instead of
+	// just reporting "not found" - the first caller to miss gets Won=true
+	// (nobody's claimed this key yet), and any caller arriving before that
+	// stub expires gets AlreadyWon=true instead (someone already has). The
+	// stub itself carries no content; it only exists to answer "have I been
+	// asked for recently" on a later miss. See memcache.MetaGetResult for the
+	// full semantics.
+	MetaGet(key string, vivifyTTL int32) (*memcache.MetaGetResult, error)
 	Close()
 }
 

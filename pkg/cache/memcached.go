@@ -153,6 +153,49 @@ func (c *Memcached) FetchKey(ctx context.Context, key string) ([]byte, bool) {
 	return item.Value, true
 }
 
+// FetchKeyWithMeta implements Cache. On a miss, it uses memcached's meta-get
+// vivify mechanism to tell whether this is the first sighting of key (don't
+// cache yet - possible one-hit-wonder) or a repeat sighting within vivifyTTL
+// seconds (worth caching now). This costs exactly one wire request to
+// decide, the same as FetchKey; Store, when the caller chooses to call it
+// afterwards, is the same single additional request Store always was.
+func (c *Memcached) FetchKeyWithMeta(ctx context.Context, key string, vivifyTTL int32) (buf []byte, found bool, shouldStore bool) {
+	select {
+	case <-ctx.Done():
+		return nil, false, false
+	default:
+	}
+
+	const method = "Memcache.MetaGet"
+	var res *memcache.MetaGetResult
+	err := measureRequest(ctx, method, c.requestDuration, memcacheStatusCode, func(_ context.Context) error {
+		var err error
+		res, err = c.memcache.MetaGet(key, vivifyTTL)
+		if err != nil {
+			level.Error(c.logger).Log("msg", "Error meta-getting key from memcached", "err", err, "key", key)
+		}
+		return err
+	})
+	if err != nil {
+		// Fail safe: treat like a plain miss that doesn't get admitted, rather
+		// than risking every errored lookup being treated as "claimed" and
+		// caching nothing, or as "first sighting" and caching everything.
+		return nil, false, false
+	}
+	switch res.Sighting {
+	case memcache.Found:
+		return res.Value, true, false
+	case memcache.SubsequentMiss:
+		// Someone already asked for this key within the window - store it now.
+		return nil, false, true
+	case memcache.FirstMiss:
+		// Nobody's claimed this key yet (or vivify wasn't requested) - don't store yet.
+		return nil, false, false
+	default:
+		return nil, false, false
+	}
+}
+
 // Store stores the key in the cache.
 func (c *Memcached) Store(ctx context.Context, keys []string, bufs [][]byte) {
 	for i := range keys {

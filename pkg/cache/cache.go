@@ -48,6 +48,18 @@ type Cache interface {
 	MaxItemSize() int
 	Fetch(ctx context.Context, keys []string) (found []string, bufs [][]byte, missing []string)
 	FetchKey(ctx context.Context, key string) (buf []byte, found bool)
+	// FetchKeyWithMeta behaves like FetchKey on a hit (found=true). On a miss,
+	// it additionally reports whether the caller should go on to Store the
+	// value it's about to fetch from the upstream source. Backends that
+	// support a "cache only on repeat sighting" admission policy use
+	// vivifyTTL as the window in seconds within which a repeat request for
+	// the same key counts as a sighting worth caching; shouldStore is false
+	// the first time a key is seen within that window (don't cache what might
+	// be a one-hit-wonder) and true on any sighting after that. Backends
+	// without such a policy always return shouldStore=true on a miss,
+	// matching FetchKey's unconditional-cache-on-miss behavior, and can
+	// ignore vivifyTTL entirely.
+	FetchKeyWithMeta(ctx context.Context, key string, vivifyTTL int32) (buf []byte, found bool, shouldStore bool)
 	// Release allows compliant implementations to reclaim buffers back into a pool for memory efficiency
 	Release([]byte)
 	Stop()
